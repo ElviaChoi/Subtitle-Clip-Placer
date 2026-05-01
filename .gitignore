@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+
+# Local runtime and bundled binaries
+ffmpeg/
+ffmpeg-*-essentials_build/
+*.exe
+
+# User media and generated outputs
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.avi
+*.m4v
+*.srt
+*.work.csv
+output/
+exports/
+temp/
+tmp/
+
+# Local app/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
