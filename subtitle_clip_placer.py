@@ -413,6 +413,16 @@ def build_scene_table_placements(slots: list[Slot], videos: list[Path], narratio
     return placements, missing
 
 
+def filter_videos_from_start_number(videos: list[Path], start_number: int) -> list[Path]:
+    if start_number <= 1:
+        return videos
+    numbered = [video for video in videos if (number := leading_number(video)) is not None and number >= start_number]
+    if numbered:
+        return numbered
+    offset = start_number - 1
+    return videos[offset:] if offset < len(videos) else []
+
+
 def build_placements(
     slots: list[Slot],
     videos: list[Path],
@@ -872,9 +882,10 @@ class App(tk.Tk):
         self.csv_var = tk.StringVar()
         self.ffmpeg_var = tk.StringVar(value=self.default_ffmpeg_path())
         self.aspect_var = tk.StringVar(value="가로 영상 (1920x1080)")
-        self.mode_var = tk.StringVar(value="자동")
+        self.mode_var = tk.StringVar(value="반복 후 자르기")
         self.threshold_var = tk.DoubleVar(value=1.2)
-        self.last_duration_var = tk.DoubleVar(value=6.0)
+        self.last_duration_var = tk.DoubleVar(value=8.0)
+        self.video_start_number_var = tk.IntVar(value=1)
         self.keep_temp_var = tk.BooleanVar(value=False)
 
         self.configure_styles()
@@ -950,15 +961,18 @@ class App(tk.Tk):
 
         form = ttk.LabelFrame(root, text="파일과 출력 설정", padding=12, style="Panel.TLabelframe")
         form.pack(fill=tk.X)
+        form.columnconfigure(0, minsize=132)
         form.columnconfigure(1, weight=1)
 
         self.add_path_row(form, 0, "SRT 파일", self.srt_var, self.browse_srt)
         self.add_path_row(form, 1, "영상 폴더", self.video_dir_var, self.browse_video_dir)
-        self.add_path_row(form, 2, "저장 위치", self.output_var, self.browse_output)
+        self.add_path_row(form, 2, "저장 위치/파일명", self.output_var, self.browse_output)
         self.add_path_row(form, 3, "CSV 매핑(선택)", self.csv_var, self.browse_csv)
         self.add_path_row(form, 4, "ffmpeg.exe", self.ffmpeg_var, self.browse_ffmpeg)
 
-        ttk.Label(form, text="화면 비율", style="Panel.TLabel").grid(row=5, column=0, sticky=tk.W, pady=8)
+        ttk.Label(form, text="화면 비율", style="Panel.TLabel").grid(
+            row=5, column=0, sticky=tk.W, padx=(0, 18), pady=8
+        )
         aspect = ttk.Combobox(
             form,
             textvariable=self.aspect_var,
@@ -968,7 +982,9 @@ class App(tk.Tk):
         )
         aspect.grid(row=5, column=1, sticky=tk.EW, pady=8)
 
-        ttk.Label(form, text="부족한 영상 처리", style="Panel.TLabel").grid(row=6, column=0, sticky=tk.W, pady=8)
+        ttk.Label(form, text="부족한 영상 처리", style="Panel.TLabel").grid(
+            row=6, column=0, sticky=tk.W, padx=(0, 18), pady=8
+        )
         mode = ttk.Combobox(
             form,
             textvariable=self.mode_var,
@@ -978,7 +994,9 @@ class App(tk.Tk):
         )
         mode.grid(row=6, column=1, sticky=tk.EW, pady=8)
 
-        ttk.Label(form, text="세부 옵션", style="Panel.TLabel").grid(row=7, column=0, sticky=tk.NW, pady=(8, 6))
+        ttk.Label(form, text="세부 옵션", style="Panel.TLabel").grid(
+            row=7, column=0, sticky=tk.NW, padx=(0, 18), pady=(8, 6)
+        )
         options = ttk.Frame(form, style="Panel.TFrame")
         options.grid(row=7, column=1, sticky=tk.EW, pady=(6, 8))
         options.columnconfigure(0, weight=1)
@@ -1022,11 +1040,23 @@ class App(tk.Tk):
             width=8,
             font=("Malgun Gothic", 10),
         ).grid(row=0, column=1, sticky=tk.EW)
+        ttk.Label(common_options, text="영상 시작 번호", style="Panel.TLabel").grid(
+            row=1, column=0, sticky=tk.W, padx=(0, 8), pady=(8, 0)
+        )
+        ttk.Spinbox(
+            common_options,
+            from_=1,
+            to=999,
+            increment=1,
+            textvariable=self.video_start_number_var,
+            width=8,
+            font=("Malgun Gothic", 10),
+        ).grid(row=1, column=1, sticky=tk.EW, pady=(8, 0))
         ttk.Checkbutton(
             common_options,
             text="임시 파일 보관",
             variable=self.keep_temp_var,
-        ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
+        ).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
 
         hint = ttk.Label(
             root,
@@ -1132,7 +1162,9 @@ class App(tk.Tk):
         self.preview_tree.configure(yscrollcommand=preview_scroll.set)
 
     def add_path_row(self, parent, row: int, label: str, var: tk.StringVar, command) -> None:
-        ttk.Label(parent, text=label, style="Panel.TLabel").grid(row=row, column=0, sticky=tk.W, pady=6)
+        ttk.Label(parent, text=label, style="Panel.TLabel").grid(
+            row=row, column=0, sticky=tk.W, padx=(0, 18), pady=6
+        )
         ttk.Entry(parent, textvariable=var).grid(
             row=row, column=1, sticky=tk.EW, padx=(0, 8), pady=6
         )
@@ -1166,7 +1198,7 @@ class App(tk.Tk):
 
     def browse_output(self) -> None:
         path = filedialog.asksaveasfilename(
-            title="결과 MP4 저장",
+            title="결과 MP4 저장 위치/파일명 선택",
             defaultextension=".mp4",
             filetypes=[("MP4 video", "*.mp4")],
         )
@@ -1204,6 +1236,8 @@ class App(tk.Tk):
             raise ValueError("자동 느리게 기준은 1보다 커야 합니다.")
         if self.last_duration_var.get() <= 0:
             raise ValueError("마지막 자막 길이는 0보다 커야 합니다.")
+        if self.video_start_number_var.get() < 1:
+            raise ValueError("영상 시작 번호는 1 이상이어야 합니다.")
         return srt, videos, output
 
     def refresh_preview(self) -> None:
@@ -1321,7 +1355,10 @@ class App(tk.Tk):
         try:
             captions = read_srt_captions(srt)
             slots = build_slots(captions, float(self.last_duration_var.get()))
-            videos = discover_videos(video_dir)
+            videos = filter_videos_from_start_number(
+                discover_videos(video_dir),
+                int(self.video_start_number_var.get()),
+            )
             narrations = read_scene_table(Path(scene_table_path))
             placements, missing = build_scene_table_placements(slots, videos, narrations)
             write_work_csv(Path(output_path), placements)
@@ -1329,6 +1366,7 @@ class App(tk.Tk):
             self.refresh_preview()
             self.log("")
             self.log(f"AI 장면표 매핑 CSV 저장: {output_path}")
+            self.log(f"영상 시작 번호: {int(self.video_start_number_var.get())}")
             self.log(f"매칭된 장면: {len(narrations) - len(missing)}개 / {len(narrations)}개")
             if missing:
                 self.log("매칭 실패 문구:")
