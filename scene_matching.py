@@ -54,11 +54,11 @@ def read_scene_table(path: Path) -> list[str]:
     narration_key = None
     for key in reader.fieldnames:
         cleaned = (key or "").strip().replace(" ", "")
-        if cleaned in {"한글내레이션", "내레이션", "대사", "시작대사"}:
+        if cleaned in {"한글내레이션", "내레이션", "대사", "시작대사", "시작자막"}:
             narration_key = key
             break
     if narration_key is None:
-        raise ValueError("AI 장면표에는 '한글 내레이션' 열이 있어야 합니다.")
+        raise ValueError("AI 장면표에는 '한글 내레이션' 또는 '시작 자막' 열이 있어야 합니다.")
 
     narrations: list[str] = []
     for row in reader:
