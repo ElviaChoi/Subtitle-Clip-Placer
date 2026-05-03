@@ -17,6 +17,8 @@ from scene_matching import filter_videos_from_start_number, find_scene_start_slo
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | IMAGE_EXTENSIONS
 
 
 @dataclass
@@ -44,6 +46,7 @@ class Placement:
     slot: Slot
     action: str
     video: Path | None
+    effect: str = ""
 
 
 @dataclass
@@ -51,6 +54,7 @@ class RenderRun:
     action: str
     video: Path | None
     slots: list[Slot]
+    effect: str = ""
 
     @property
     def duration(self) -> float:
@@ -154,7 +158,7 @@ def discover_videos(folder: Path) -> list[Path]:
     videos = [
         item
         for item in folder.iterdir()
-        if item.is_file() and item.suffix.lower() in VIDEO_EXTENSIONS
+        if item.is_file() and item.suffix.lower() in MEDIA_EXTENSIONS
     ]
     return sorted(
         videos,
@@ -215,13 +219,36 @@ def normalize_action(value: str, has_video: bool) -> str:
     raw = value.strip().lower().replace(" ", "")
     if raw in {"", "자동"}:
         return "video" if has_video else "auto"
-    if raw in {"영상", "새영상", "video", "clip"}:
+    if raw in {"영상", "새영상", "이미지", "사진", "video", "clip", "image", "photo"}:
         return "video"
     if raw in {"이전유지", "유지", "계속", "previous", "prev", "hold"}:
         return "hold"
     if raw in {"검은화면", "빈화면", "없음", "건너뜀", "blank", "black", "none", "skip"}:
         return "blank"
     raise ValueError(f"지원하지 않는 작업 값입니다: {value}")
+
+
+def normalize_effect(value: str) -> str:
+    raw = value.strip().lower().replace(" ", "")
+    if raw in {"", "없음", "none", "no", "off"}:
+        return ""
+    if raw in {"줌인", "확대", "zoomin"}:
+        return "줌인"
+    if raw in {"줌아웃", "축소", "zoomout"}:
+        return "줌아웃"
+    if raw in {"페이드", "fade", "fadeinout"}:
+        return "페이드"
+    raise ValueError(f"지원하지 않는 효과 값입니다: {value}")
+
+
+def is_image_file(path: Path | None) -> bool:
+    return path is not None and path.suffix.lower() in IMAGE_EXTENSIONS
+
+
+def display_action(placement: Placement) -> str:
+    if placement.action == "video" and is_image_file(placement.video):
+        return "이미지"
+    return action_label(placement.action)
 
 
 def action_label(action: str) -> str:
@@ -234,7 +261,7 @@ def action_label(action: str) -> str:
     return action
 
 
-def read_csv_placement_overrides(csv_path: Path, video_folder: Path) -> dict[int, tuple[str, Path | None]]:
+def read_csv_placement_overrides(csv_path: Path, video_folder: Path) -> dict[int, tuple[str, Path | None, str]]:
     with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
         if not reader.fieldnames:
@@ -242,14 +269,16 @@ def read_csv_placement_overrides(csv_path: Path, video_folder: Path) -> dict[int
         number_key = "번호" if "번호" in reader.fieldnames else None
         video_key = "영상파일" if "영상파일" in reader.fieldnames else None
         action_key = "작업" if "작업" in reader.fieldnames else None
+        effect_key = "효과" if "효과" in reader.fieldnames else None
         if number_key is None or video_key is None:
             raise ValueError("CSV에는 '번호'와 '영상파일' 열이 있어야 합니다.")
 
-        mapping: dict[int, tuple[str, Path | None]] = {}
+        mapping: dict[int, tuple[str, Path | None, str]] = {}
         for row in reader:
             raw_number = (row.get(number_key) or "").strip()
             raw_video = (row.get(video_key) or "").strip()
             raw_action = (row.get(action_key) or "").strip() if action_key else ""
+            raw_effect = (row.get(effect_key) or "").strip() if effect_key else ""
             if not raw_number:
                 continue
             try:
@@ -263,18 +292,21 @@ def read_csv_placement_overrides(csv_path: Path, video_folder: Path) -> dict[int
             if action == "video" and video is None:
                 # In Excel, users often leave 영상파일 blank to continue the previous clip.
                 action = "hold"
-            mapping[number] = (action, video)
+            effect = normalize_effect(raw_effect) if action == "video" and is_image_file(video) else ""
+            mapping[number] = (action, video, effect)
     return mapping
 
 
 def build_scene_table_placements(slots: list[Slot], videos: list[Path], narrations: list[str]) -> tuple[list[Placement], list[str]]:
     matches, missing = find_scene_start_slots(slots, narrations)
     if not matches:
-        raise ValueError("AI 장면표 문구와 SRT 대사가 하나도 매칭되지 않았습니다.")
-    if len(videos) < len(matches):
-        raise ValueError(f"영상 파일이 부족합니다. 장면 {len(matches)}개, 영상 {len(videos)}개입니다.")
+        return [Placement(slot=slot, action="blank", video=None) for slot in slots], list(narrations)
 
-    starts_by_index = {slot.index: videos[position] for position, (slot, _narration) in enumerate(matches)}
+    available_matches = matches[: len(videos)]
+    if len(videos) < len(matches):
+        missing.extend(narration for _slot, narration in matches[len(videos) :])
+
+    starts_by_index = {slot.index: videos[position] for position, (slot, _narration) in enumerate(available_matches)}
     placements: list[Placement] = []
     has_started = False
     for slot in slots:
@@ -320,12 +352,13 @@ def build_placements(
 
     if csv_path and csv_path.exists():
         mapping = read_csv_placement_overrides(csv_path, video_folder)
-        for index, (action, video) in mapping.items():
+        for index, (action, video, effect) in mapping.items():
             if 1 <= index <= slot_count:
                 placements[index - 1] = Placement(
                     slot=slots[index - 1],
                     action=action,
                     video=video,
+                    effect=effect,
                 )
     return placements
 
@@ -334,7 +367,7 @@ def write_work_csv(path: Path, placements: list[Placement]) -> None:
     with path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(
             file,
-            fieldnames=["번호", "시작시간", "길이초", "대사", "작업", "영상파일"],
+            fieldnames=["번호", "시작시간", "길이초", "대사", "작업", "영상파일", "효과"],
         )
         writer.writeheader()
         for placement in placements:
@@ -347,6 +380,7 @@ def write_work_csv(path: Path, placements: list[Placement]) -> None:
                     "대사": slot.text,
                     "작업": action_label(placement.action),
                     "영상파일": placement.video.name if placement.video else "",
+                    "효과": placement.effect,
                 }
             )
 
@@ -373,7 +407,12 @@ def build_render_runs(placements: list[Placement]) -> list[RenderRun]:
         if placement.action == "video":
             if placement.video is None:
                 raise ValueError(f"{placement.slot.index}번 대사는 영상파일이 필요합니다.")
-            current = RenderRun(action="video", video=placement.video, slots=[placement.slot])
+            current = RenderRun(
+                action="video",
+                video=placement.video,
+                slots=[placement.slot],
+                effect=placement.effect,
+            )
             runs.append(current)
             continue
 
@@ -459,6 +498,41 @@ def normalize_filter(width: int, height: int, extra: str | None = None) -> str:
     return base
 
 
+def image_filter(width: int, height: int, duration: float, effect: str) -> str:
+    frames = max(1, int(math.ceil(duration * 30)))
+    large_width = width * 2
+    large_height = height * 2
+    fit_large = (
+        f"scale={large_width}:{large_height}:force_original_aspect_ratio=increase,"
+        f"crop={large_width}:{large_height}"
+    )
+    center = "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+
+    if effect == "줌인":
+        return (
+            f"{fit_large},"
+            f"zoompan=z='min(1+0.12*on/{frames},1.12)':{center}:d={frames}:s={width}x{height}:fps=30,"
+            "format=yuv420p"
+        )
+    if effect == "줌아웃":
+        return (
+            f"{fit_large},"
+            f"zoompan=z='max(1.12-0.12*on/{frames},1)':{center}:d={frames}:s={width}x{height}:fps=30,"
+            "format=yuv420p"
+        )
+
+    base = normalize_filter(width, height)
+    if effect == "페이드":
+        fade_duration = min(0.6, max(0.1, duration / 3))
+        fade_out_start = max(0.0, duration - fade_duration)
+        return (
+            f"{base},"
+            f"fade=t=in:st=0:d={fade_duration:.3f},"
+            f"fade=t=out:st={fade_out_start:.3f}:d={fade_duration:.3f}"
+        )
+    return base
+
+
 def mode_for_slot(mode: str, slot_duration: float, video_duration: float, threshold: float) -> str:
     if video_duration >= slot_duration:
         return "trim"
@@ -469,6 +543,44 @@ def mode_for_slot(mode: str, slot_duration: float, video_duration: float, thresh
     if slot_duration <= video_duration * threshold:
         return "slow"
     return "loop"
+
+
+def render_image_segment(
+    ffmpeg: str,
+    image: Path,
+    output: Path,
+    slot_duration: float,
+    width: int,
+    height: int,
+    effect: str,
+    log,
+) -> str:
+    vf = image_filter(width, height, slot_duration, effect)
+    command = [
+        ffmpeg,
+        "-y",
+        "-loop",
+        "1",
+        "-i",
+        str(image),
+        "-t",
+        f"{slot_duration:.3f}",
+        "-vf",
+        vf,
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-movflags",
+        "+faststart",
+        str(output),
+    ]
+    run_process(command, log)
+    effect_text = effect if effect else "효과 없음"
+    return f"이미지 {effect_text} ({slot_duration:.2f}s)"
 
 
 def render_segment(
@@ -698,22 +810,36 @@ def build_video(
                 )
             else:
                 assert run.video is not None
+                media_type = "이미지" if is_image_file(run.video) else "영상"
+                effect_text = f", 효과: {run.effect}" if is_image_file(run.video) and run.effect else ""
                 log(
-                    f"[{run_index}/{len(runs)}] {slot_numbers}번 대사 -> {run.video.name} "
-                    f"{run.start:.2f}s~{run.end:.2f}s ({run.duration:.2f}s)"
+                    f"[{run_index}/{len(runs)}] {slot_numbers}번 대사 -> {media_type} {run.video.name} "
+                    f"{run.start:.2f}s~{run.end:.2f}s ({run.duration:.2f}s){effect_text}"
                 )
-                result = render_segment(
-                    ffmpeg=ffmpeg,
-                    ffprobe=ffprobe,
-                    video=run.video,
-                    output=segment,
-                    slot_duration=run.duration,
-                    width=width,
-                    height=height,
-                    mode=mode,
-                    threshold=threshold,
-                    log=log,
-                )
+                if is_image_file(run.video):
+                    result = render_image_segment(
+                        ffmpeg=ffmpeg,
+                        image=run.video,
+                        output=segment,
+                        slot_duration=run.duration,
+                        width=width,
+                        height=height,
+                        effect=run.effect,
+                        log=log,
+                    )
+                else:
+                    result = render_segment(
+                        ffmpeg=ffmpeg,
+                        ffprobe=ffprobe,
+                        video=run.video,
+                        output=segment,
+                        slot_duration=run.duration,
+                        width=width,
+                        height=height,
+                        mode=mode,
+                        threshold=threshold,
+                        log=log,
+                    )
             log(f"처리 방식: {result}")
             segments.append(segment)
 
@@ -934,6 +1060,13 @@ class App(tk.Tk):
         )
         hint.pack(fill=tk.X, pady=(8, 8))
 
+        effect_hint = ttk.Label(
+            root,
+            text="이미지 효과 값: 없음 / 줌인 / 줌아웃 / 페이드",
+            style="App.TLabel",
+        )
+        effect_hint.pack(fill=tk.X, pady=(0, 8))
+
         actions = ttk.Frame(root, style="App.TFrame")
         actions.pack(fill=tk.X, pady=(0, 10))
         ttk.Button(actions, text="1. 대사/영상 확인", command=self.refresh_preview).pack(
@@ -978,7 +1111,7 @@ class App(tk.Tk):
 
         preview_frame = ttk.LabelFrame(workspace, text="대사 기준 배치 미리보기", padding=8, style="Panel.TLabelframe")
         preview_frame.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 8))
-        columns = ("index", "duration", "caption", "action", "video")
+        columns = ("index", "duration", "caption", "action", "effect", "video")
         self.preview_tree = ttk.Treeview(
             preview_frame,
             columns=columns,
@@ -989,12 +1122,14 @@ class App(tk.Tk):
         self.preview_tree.heading("duration", text="길이")
         self.preview_tree.heading("caption", text="자막 대사")
         self.preview_tree.heading("action", text="작업")
+        self.preview_tree.heading("effect", text="효과")
         self.preview_tree.heading("video", text="연결 영상")
         self.preview_tree.column("index", width=56, anchor=tk.CENTER, stretch=False)
         self.preview_tree.column("duration", width=80, anchor=tk.CENTER, stretch=False)
-        self.preview_tree.column("caption", width=360, anchor=tk.W)
+        self.preview_tree.column("caption", width=320, anchor=tk.W)
         self.preview_tree.column("action", width=82, anchor=tk.CENTER, stretch=False)
-        self.preview_tree.column("video", width=260, anchor=tk.W)
+        self.preview_tree.column("effect", width=74, anchor=tk.CENTER, stretch=False)
+        self.preview_tree.column("video", width=240, anchor=tk.W)
         self.preview_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         preview_scroll = ttk.Scrollbar(preview_frame, command=self.preview_tree.yview)
         preview_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1133,7 +1268,8 @@ class App(tk.Tk):
                     position,
                     f"{slot.duration:.2f}s",
                     caption,
-                    action_label(placement.action),
+                    display_action(placement),
+                    placement.effect if placement.effect else "",
                     placement.video.name if placement.video else "",
                 ),
             )
@@ -1169,6 +1305,7 @@ class App(tk.Tk):
             write_work_csv(Path(path), placements)
             self.csv_var.set(path)
             self.refresh_preview()
+            self.log("이미지 효과 값: 없음 / 줌인 / 줌아웃 / 페이드")
             messagebox.showinfo("완료", "CSV 작업표를 저장했습니다.")
         except Exception as exc:
             messagebox.showerror("CSV 저장 실패", str(exc))
@@ -1199,15 +1336,7 @@ class App(tk.Tk):
         if not scene_table_path:
             return
 
-        default_name = srt.with_suffix(".ai_mapping.csv").name
-        output_path = filedialog.asksaveasfilename(
-            title="AI 장면표 매핑 CSV 저장",
-            initialfile=default_name,
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv")],
-        )
-        if not output_path:
-            return
+        output_path = srt.with_suffix(".ai_mapping.csv")
 
         try:
             captions = read_srt_captions(srt)
@@ -1218,12 +1347,13 @@ class App(tk.Tk):
             )
             narrations = read_scene_table(Path(scene_table_path))
             placements, missing = build_scene_table_placements(slots, videos, narrations)
-            write_work_csv(Path(output_path), placements)
-            self.csv_var.set(output_path)
+            write_work_csv(output_path, placements)
+            self.csv_var.set(str(output_path))
             self.refresh_preview()
             self.log("")
             self.log(f"AI 장면표 매핑 CSV 저장: {output_path}")
             self.log(f"영상 시작 번호: {int(self.video_start_number_var.get())}")
+            self.log("이미지 효과 값: 없음 / 줌인 / 줌아웃 / 페이드")
             self.log(f"매칭된 장면: {len(narrations) - len(missing)}개 / {len(narrations)}개")
             if missing:
                 self.log("매칭 실패 문구:")
@@ -1233,10 +1363,12 @@ class App(tk.Tk):
                     self.log(f"- 외 {len(missing) - 20}개")
                 messagebox.showwarning(
                     "일부 매칭 실패",
-                    "AI 장면표 매핑 CSV를 저장했지만 일부 문구를 SRT에서 찾지 못했습니다. 작업 로그를 확인하세요.",
+                    f"AI 장면표 매핑 CSV를 자동 저장했습니다.\n\n"
+                    f"{output_path}\n\n"
+                    "일부 문구는 자동 매핑되지 않았습니다. Excel에서 CSV를 직접 수정할 수 있습니다.",
                 )
             else:
-                messagebox.showinfo("완료", "AI 장면표 매핑 CSV를 저장했습니다.")
+                messagebox.showinfo("완료", f"AI 장면표 매핑 CSV를 자동 저장했습니다.\n\n{output_path}")
         except Exception as exc:
             self.log(f"AI 장면표 매핑 오류: {exc}")
             messagebox.showerror("AI 장면표 매핑 실패", str(exc))
