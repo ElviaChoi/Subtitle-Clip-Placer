@@ -259,7 +259,8 @@ def read_csv_placement_overrides(csv_path: Path, video_folder: Path) -> dict[int
                 continue
             video = loose_match_video(video_folder, raw_video) if raw_video else None
             if action == "video" and video is None:
-                raise ValueError(f"{number}번 대사는 영상파일이 필요합니다.")
+                # In Excel, users often leave 영상파일 blank to continue the previous clip.
+                action = "hold"
             mapping[number] = (action, video)
     return mapping
 
@@ -708,18 +709,20 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Subtitle Clip Placer")
-        self.geometry("1040x780")
-        self.minsize(900, 660)
+        self.geometry("1080x860")
+        self.minsize(940, 720)
         self.configure(bg="#f3f5f7")
 
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.worker: threading.Thread | None = None
+        self.last_error: str | None = None
 
+        self.status_var = tk.StringVar(value="대기 중")
         self.srt_var = tk.StringVar()
         self.video_dir_var = tk.StringVar()
         self.output_var = tk.StringVar()
         self.csv_var = tk.StringVar()
-        self.ffmpeg_var = tk.StringVar()
+        self.ffmpeg_var = tk.StringVar(value=self.default_ffmpeg_path())
         self.aspect_var = tk.StringVar(value="가로 영상 (1920x1080)")
         self.mode_var = tk.StringVar(value="자동")
         self.threshold_var = tk.DoubleVar(value=1.2)
@@ -728,7 +731,19 @@ class App(tk.Tk):
 
         self.configure_styles()
         self.create_widgets()
+        self.mode_var.trace_add("write", self.update_mode_option_state)
+        self.update_mode_option_state()
         self.after(100, self.drain_log_queue)
+
+    def default_ffmpeg_path(self) -> str:
+        app_dir = Path(__file__).resolve().parent
+        for candidate in (
+            app_dir / "ffmpeg" / "bin" / "ffmpeg.exe",
+            app_dir / "ffmpeg.exe",
+        ):
+            if candidate.exists():
+                return str(candidate)
+        return ""
 
     def configure_styles(self) -> None:
         style = ttk.Style(self)
@@ -736,6 +751,8 @@ class App(tk.Tk):
             style.theme_use("clam")
         except tk.TclError:
             pass
+        self.option_add("*TCombobox*Listbox.font", ("Malgun Gothic", 11))
+        self.option_add("*TCombobox*Listbox.selectBorderWidth", 2)
         style.configure("App.TFrame", background="#f3f5f7")
         style.configure("Panel.TLabelframe", background="#ffffff", bordercolor="#d8dee7")
         style.configure(
@@ -745,11 +762,14 @@ class App(tk.Tk):
             font=("Malgun Gothic", 10, "bold"),
         )
         style.configure("App.TLabel", background="#f3f5f7", foreground="#243043")
+        style.configure("Panel.TFrame", background="#ffffff")
         style.configure("Panel.TLabel", background="#ffffff", foreground="#243043")
         style.configure("Muted.TLabel", background="#ffffff", foreground="#697386")
-        style.configure("TEntry", padding=4)
-        style.configure("TCombobox", padding=4)
-        style.configure("TButton", padding=(12, 6), font=("Malgun Gothic", 9))
+        style.configure("Status.TLabel", background="#f3f5f7", foreground="#3b4758")
+        style.configure("TEntry", padding=(8, 6), font=("Malgun Gothic", 10))
+        style.configure("TCombobox", padding=(8, 7), arrowsize=18, font=("Malgun Gothic", 10))
+        style.configure("TSpinbox", padding=(8, 6), arrowsize=14, font=("Malgun Gothic", 10))
+        style.configure("TButton", padding=(12, 7), font=("Malgun Gothic", 9))
         style.configure(
             "Primary.TButton",
             padding=(16, 7),
@@ -790,49 +810,75 @@ class App(tk.Tk):
         self.add_path_row(form, 3, "CSV 매핑(선택)", self.csv_var, self.browse_csv)
         self.add_path_row(form, 4, "ffmpeg.exe", self.ffmpeg_var, self.browse_ffmpeg)
 
-        ttk.Label(form, text="화면 비율", style="Panel.TLabel").grid(row=5, column=0, sticky=tk.W, pady=6)
+        ttk.Label(form, text="화면 비율", style="Panel.TLabel").grid(row=5, column=0, sticky=tk.W, pady=8)
         aspect = ttk.Combobox(
             form,
             textvariable=self.aspect_var,
             values=["세로 쇼츠 (1080x1920)", "가로 영상 (1920x1080)"],
             state="readonly",
+            font=("Malgun Gothic", 10),
         )
-        aspect.grid(row=5, column=1, sticky=tk.EW, pady=6)
+        aspect.grid(row=5, column=1, sticky=tk.EW, pady=8)
 
-        ttk.Label(form, text="부족한 영상 처리", style="Panel.TLabel").grid(row=6, column=0, sticky=tk.W, pady=6)
+        ttk.Label(form, text="부족한 영상 처리", style="Panel.TLabel").grid(row=6, column=0, sticky=tk.W, pady=8)
         mode = ttk.Combobox(
             form,
             textvariable=self.mode_var,
             values=["자동", "반복 후 자르기", "느리게 늘리기"],
             state="readonly",
+            font=("Malgun Gothic", 10),
         )
-        mode.grid(row=6, column=1, sticky=tk.EW, pady=6)
+        mode.grid(row=6, column=1, sticky=tk.EW, pady=8)
 
-        options = ttk.Frame(form)
-        options.grid(row=7, column=1, sticky=tk.EW, pady=6)
-        ttk.Label(options, text="자동 느리게 기준", style="Panel.TLabel").pack(side=tk.LEFT)
-        ttk.Spinbox(
-            options,
+        ttk.Label(form, text="세부 옵션", style="Panel.TLabel").grid(row=7, column=0, sticky=tk.NW, pady=(8, 6))
+        options = ttk.Frame(form, style="Panel.TFrame")
+        options.grid(row=7, column=1, sticky=tk.EW, pady=(6, 8))
+        options.columnconfigure(0, weight=1)
+        options.columnconfigure(1, weight=1)
+
+        auto_options = ttk.LabelFrame(options, text="자동 모드", padding=10, style="Panel.TLabelframe")
+        auto_options.grid(row=0, column=0, sticky=tk.EW, padx=(0, 8))
+        auto_options.columnconfigure(1, weight=1)
+        ttk.Label(auto_options, text="느리게 허용 배율", style="Panel.TLabel").grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 8)
+        )
+        self.threshold_spinbox = ttk.Spinbox(
+            auto_options,
             from_=1.01,
             to=2.0,
             increment=0.05,
             textvariable=self.threshold_var,
             width=8,
-        ).pack(side=tk.LEFT, padx=(8, 18))
-        ttk.Label(options, text="마지막 자막 길이(초)", style="Panel.TLabel").pack(side=tk.LEFT)
+            font=("Malgun Gothic", 10),
+        )
+        self.threshold_spinbox.grid(row=0, column=1, sticky=tk.EW)
+        self.threshold_hint = ttk.Label(
+            auto_options,
+            text="1.2 = 원본 길이의 120%까지 느리게",
+            style="Muted.TLabel",
+        )
+        self.threshold_hint.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
+
+        common_options = ttk.LabelFrame(options, text="공통", padding=10, style="Panel.TLabelframe")
+        common_options.grid(row=0, column=1, sticky=tk.EW)
+        common_options.columnconfigure(1, weight=1)
+        ttk.Label(common_options, text="마지막 자막 길이", style="Panel.TLabel").grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 8)
+        )
         ttk.Spinbox(
-            options,
+            common_options,
             from_=1.0,
             to=30.0,
             increment=0.5,
             textvariable=self.last_duration_var,
             width=8,
-        ).pack(side=tk.LEFT, padx=(8, 18))
+            font=("Malgun Gothic", 10),
+        ).grid(row=0, column=1, sticky=tk.EW)
         ttk.Checkbutton(
-            options,
+            common_options,
             text="임시 파일 보관",
             variable=self.keep_temp_var,
-        ).pack(side=tk.LEFT)
+        ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
 
         hint = ttk.Label(
             root,
@@ -885,17 +931,39 @@ class App(tk.Tk):
             side=tk.LEFT, padx=8
         )
 
-        self.progress = ttk.Progressbar(root, mode="indeterminate")
-        self.progress.pack(fill=tk.X, pady=(0, 10))
+        status_row = ttk.Frame(root, style="App.TFrame")
+        status_row.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(status_row, text="상태", style="App.TLabel").pack(side=tk.LEFT)
+        ttk.Label(status_row, textvariable=self.status_var, style="Status.TLabel").pack(
+            side=tk.LEFT, padx=(10, 0)
+        )
+
+        log_frame = ttk.LabelFrame(root, text="작업 로그", padding=8, style="Panel.TLabelframe")
+        log_frame.pack(fill=tk.BOTH, pady=(0, 8))
+        self.log_text = tk.Text(
+            log_frame,
+            wrap=tk.WORD,
+            height=8,
+            bg="#fbfcfe",
+            fg="#1f2937",
+            relief=tk.FLAT,
+            font=("Consolas", 9),
+        )
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text.configure(yscrollcommand=log_scroll.set)
+        if self.ffmpeg_var.get():
+            self.log(f"FFmpeg 자동 설정: {self.ffmpeg_var.get()}")
 
         preview_frame = ttk.LabelFrame(root, text="대사 기준 배치 미리보기", padding=8, style="Panel.TLabelframe")
-        preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        preview_frame.pack(fill=tk.BOTH, expand=True)
         columns = ("index", "duration", "caption", "action", "video")
         self.preview_tree = ttk.Treeview(
             preview_frame,
             columns=columns,
             show="headings",
-            height=8,
+            height=6,
         )
         self.preview_tree.heading("index", text="번호")
         self.preview_tree.heading("duration", text="길이")
@@ -912,22 +980,6 @@ class App(tk.Tk):
         preview_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.preview_tree.configure(yscrollcommand=preview_scroll.set)
 
-        log_frame = ttk.LabelFrame(root, text="작업 로그", padding=8, style="Panel.TLabelframe")
-        log_frame.pack(fill=tk.BOTH, expand=True)
-        self.log_text = tk.Text(
-            log_frame,
-            wrap=tk.WORD,
-            height=10,
-            bg="#fbfcfe",
-            fg="#1f2937",
-            relief=tk.FLAT,
-            font=("Consolas", 9),
-        )
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log_text.configure(yscrollcommand=scroll.set)
-
     def add_path_row(self, parent, row: int, label: str, var: tk.StringVar, command) -> None:
         ttk.Label(parent, text=label, style="Panel.TLabel").grid(row=row, column=0, sticky=tk.W, pady=6)
         ttk.Entry(parent, textvariable=var).grid(
@@ -936,6 +988,13 @@ class App(tk.Tk):
         ttk.Button(parent, text="선택", command=command).grid(
             row=row, column=2, sticky=tk.E, pady=6
         )
+
+    def update_mode_option_state(self, *_args) -> None:
+        if not hasattr(self, "threshold_spinbox"):
+            return
+        state = tk.NORMAL if self.mode_var.get() == "자동" else tk.DISABLED
+        self.threshold_spinbox.configure(state=state)
+        self.threshold_hint.configure(state=state)
 
     def browse_srt(self) -> None:
         path = filedialog.askopenfilename(
@@ -1083,7 +1142,8 @@ class App(tk.Tk):
             return
 
         self.start_button.configure(state=tk.DISABLED)
-        self.progress.start(10)
+        self.status_var.set("영상 생성 중")
+        self.last_error = None
         self.log("")
         self.log("작업을 시작합니다.")
         self.refresh_preview()
@@ -1123,14 +1183,17 @@ class App(tk.Tk):
             while True:
                 message = self.log_queue.get_nowait()
                 if message == "__DONE__":
-                    self.progress.stop()
+                    self.status_var.set("완료")
                     self.start_button.configure(state=tk.NORMAL)
                     messagebox.showinfo("완료", "영상 생성이 완료되었습니다.")
                 elif message == "__FAILED__":
-                    self.progress.stop()
+                    self.status_var.set("실패")
                     self.start_button.configure(state=tk.NORMAL)
-                    messagebox.showerror("실패", "영상 생성에 실패했습니다. 작업 로그를 확인하세요.")
+                    detail = f"\n\n마지막 오류:\n{self.last_error}" if self.last_error else ""
+                    messagebox.showerror("실패", f"영상 생성에 실패했습니다. 작업 로그를 확인하세요.{detail}")
                 else:
+                    if message.startswith("오류:"):
+                        self.last_error = message
                     self.log(message)
         except queue.Empty:
             pass
