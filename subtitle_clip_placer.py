@@ -807,25 +807,25 @@ class App(tk.Tk):
         root = ttk.Frame(self, padding=18, style="App.TFrame")
         root.pack(fill=tk.BOTH, expand=True)
 
-        header = tk.Frame(root, bg="#182235", height=82)
-        header.pack(fill=tk.X, pady=(0, 14))
+        header = tk.Frame(root, bg="#182235", height=62)
+        header.pack(fill=tk.X, pady=(0, 10))
         header.pack_propagate(False)
         tk.Label(
             header,
             text="Subtitle Clip Placer",
             bg="#182235",
             fg="#ffffff",
-            font=("Malgun Gothic", 18, "bold"),
-        ).pack(anchor=tk.W, padx=18, pady=(14, 0))
+            font=("Malgun Gothic", 16, "bold"),
+        ).pack(anchor=tk.W, padx=16, pady=(9, 0))
         tk.Label(
             header,
             text="SRT 대사 기준으로 영상 클립을 배치하고 Excel 작업표로 매칭을 관리합니다.",
             bg="#182235",
             fg="#b9c3d4",
             font=("Malgun Gothic", 9),
-        ).pack(anchor=tk.W, padx=19, pady=(3, 0))
+        ).pack(anchor=tk.W, padx=17, pady=(2, 0))
 
-        form = ttk.LabelFrame(root, text="파일과 출력 설정", padding=12, style="Panel.TLabelframe")
+        form = ttk.LabelFrame(root, text="파일과 출력 설정", padding=10, style="Panel.TLabelframe")
         form.pack(fill=tk.X)
         form.columnconfigure(0, minsize=132)
         form.columnconfigure(1, weight=1)
@@ -932,29 +932,7 @@ class App(tk.Tk):
             ),
             style="App.TLabel",
         )
-        hint.pack(fill=tk.X, pady=(10, 10))
-
-        guide = ttk.LabelFrame(root, text="작업 순서", padding=10, style="Panel.TLabelframe")
-        guide.pack(fill=tk.X, pady=(0, 12))
-        ttk.Label(
-            guide,
-            text=(
-                "1. SRT 파일과 영상 폴더 선택  |  "
-                "2. Excel 작업표 만들기  |  "
-                "3. Excel에서 작업/영상파일 수정 후 저장  |  "
-                "4. CSV 매핑에 수정한 작업표 선택  |  "
-                "5. 최종 영상 생성"
-            ),
-            style="Panel.TLabel",
-        ).pack(fill=tk.X, padx=2, pady=(0, 4))
-        ttk.Label(
-            guide,
-            text=(
-                "Excel에서는 번호/시작시간/길이초/대사는 건드리지 말고, "
-                "'작업'과 '영상파일' 칸만 수정하세요."
-            ),
-            style="Muted.TLabel",
-        ).pack(fill=tk.X, padx=2, pady=(0, 0))
+        hint.pack(fill=tk.X, pady=(8, 8))
 
         actions = ttk.Frame(root, style="App.TFrame")
         actions.pack(fill=tk.X, pady=(0, 10))
@@ -978,6 +956,13 @@ class App(tk.Tk):
             side=tk.LEFT, padx=8
         )
 
+        guide = ttk.Label(
+            root,
+            text="흐름: SRT/영상 폴더 선택 -> AI 장면표 매핑 또는 Excel 작업표 만들기 -> 미리보기 확인 -> 최종 영상 생성",
+            style="App.TLabel",
+        )
+        guide.pack(fill=tk.X, pady=(0, 8))
+
         status_row = ttk.Frame(root, style="App.TFrame")
         status_row.pack(fill=tk.X, pady=(0, 10))
         ttk.Label(status_row, text="상태", style="App.TLabel").pack(side=tk.LEFT)
@@ -985,32 +970,20 @@ class App(tk.Tk):
             side=tk.LEFT, padx=(10, 0)
         )
 
-        log_frame = ttk.LabelFrame(root, text="작업 로그", padding=8, style="Panel.TLabelframe")
-        log_frame.pack(fill=tk.BOTH, pady=(0, 8))
-        self.log_text = tk.Text(
-            log_frame,
-            wrap=tk.WORD,
-            height=8,
-            bg="#fbfcfe",
-            fg="#1f2937",
-            relief=tk.FLAT,
-            font=("Consolas", 9),
-        )
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        log_scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
-        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log_text.configure(yscrollcommand=log_scroll.set)
-        if self.ffmpeg_var.get():
-            self.log(f"FFmpeg 자동 설정: {self.ffmpeg_var.get()}")
+        workspace = ttk.Frame(root, style="App.TFrame")
+        workspace.pack(fill=tk.BOTH, expand=True)
+        workspace.columnconfigure(0, weight=3)
+        workspace.columnconfigure(1, weight=2)
+        workspace.rowconfigure(0, weight=1)
 
-        preview_frame = ttk.LabelFrame(root, text="대사 기준 배치 미리보기", padding=8, style="Panel.TLabelframe")
-        preview_frame.pack(fill=tk.BOTH, expand=True)
+        preview_frame = ttk.LabelFrame(workspace, text="대사 기준 배치 미리보기", padding=8, style="Panel.TLabelframe")
+        preview_frame.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 8))
         columns = ("index", "duration", "caption", "action", "video")
         self.preview_tree = ttk.Treeview(
             preview_frame,
             columns=columns,
             show="headings",
-            height=6,
+            height=11,
         )
         self.preview_tree.heading("index", text="번호")
         self.preview_tree.heading("duration", text="길이")
@@ -1026,6 +999,24 @@ class App(tk.Tk):
         preview_scroll = ttk.Scrollbar(preview_frame, command=self.preview_tree.yview)
         preview_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.preview_tree.configure(yscrollcommand=preview_scroll.set)
+
+        log_frame = ttk.LabelFrame(workspace, text="작업 로그", padding=8, style="Panel.TLabelframe")
+        log_frame.grid(row=0, column=1, sticky=tk.NSEW)
+        self.log_text = tk.Text(
+            log_frame,
+            wrap=tk.WORD,
+            height=14,
+            bg="#fbfcfe",
+            fg="#1f2937",
+            relief=tk.FLAT,
+            font=("Consolas", 9),
+        )
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text.configure(yscrollcommand=log_scroll.set)
+        if self.ffmpeg_var.get():
+            self.log(f"FFmpeg 자동 설정: {self.ffmpeg_var.get()}")
 
     def add_path_row(self, parent, row: int, label: str, var: tk.StringVar, command) -> None:
         ttk.Label(parent, text=label, style="Panel.TLabel").grid(
