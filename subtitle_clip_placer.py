@@ -232,6 +232,37 @@ def action_label(action: str) -> str:
     return action
 
 
+def normalize_match_text(value: str) -> str:
+    return re.sub(r"[\s\"'“”‘’.,!?…~·ㆍ:;()\[\]{}<>《》〈〉「」『』-]+", "", value).lower()
+
+
+def has_meaningful_overlap(left: str, right: str, min_length: int = 4) -> bool:
+    if not left or not right:
+        return False
+    if left in right or right in left:
+        return True
+    for size in range(min(len(left), len(right)), min_length - 1, -1):
+        for start in range(0, len(left) - size + 1):
+            if left[start : start + size] in right:
+                return True
+    return False
+
+
+def text_ngrams(value: str, size: int = 2) -> set[str]:
+    if len(value) < size:
+        return {value} if value else set()
+    return {value[index : index + size] for index in range(len(value) - size + 1)}
+
+
+def text_similarity(left: str, right: str) -> float:
+    left_grams = text_ngrams(left)
+    right_grams = text_ngrams(right)
+    if not left_grams or not right_grams:
+        return 0.0
+    overlap = len(left_grams & right_grams)
+    return (2 * overlap) / (len(left_grams) + len(right_grams))
+
+
 def read_csv_placement_overrides(csv_path: Path, video_folder: Path) -> dict[int, tuple[str, Path | None]]:
     with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
@@ -263,6 +294,123 @@ def read_csv_placement_overrides(csv_path: Path, video_folder: Path) -> dict[int
                 action = "hold"
             mapping[number] = (action, video)
     return mapping
+
+
+def read_scene_table(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    first_line = next((line for line in text.splitlines() if line.strip()), "")
+    delimiter = "\t" if "\t" in first_line else ","
+    reader = csv.DictReader(text.splitlines(), delimiter=delimiter)
+    if not reader.fieldnames:
+        raise ValueError("AI 장면표 헤더를 찾지 못했습니다.")
+
+    narration_key = None
+    for key in reader.fieldnames:
+        cleaned = (key or "").strip().replace(" ", "")
+        if cleaned in {"한글내레이션", "내레이션", "대사", "시작대사"}:
+            narration_key = key
+            break
+    if narration_key is None:
+        raise ValueError("AI 장면표에는 '한글 내레이션' 열이 있어야 합니다.")
+
+    narrations: list[str] = []
+    for row in reader:
+        narration = (row.get(narration_key) or "").strip().strip('"')
+        if narration:
+            narrations.append(narration)
+    if not narrations:
+        raise ValueError("AI 장면표에서 내레이션 문구를 찾지 못했습니다.")
+    return narrations
+
+
+def find_scene_start_slots(slots: list[Slot], narrations: list[str]) -> tuple[list[tuple[Slot, str]], list[str]]:
+    matches: list[tuple[Slot, str]] = []
+    missing: list[str] = []
+    used_indices: set[int] = set()
+    max_joined_slots = 4
+    min_partial_length = 4
+    min_similarity = 0.30
+
+    for narration in narrations:
+        needle = normalize_match_text(narration)
+        if not needle:
+            continue
+        found: Slot | None = None
+
+        # First try a single SRT slot.
+        for slot in slots:
+            if slot.index in used_indices:
+                continue
+            haystack = normalize_match_text(slot.text)
+            if needle in haystack or (
+                len(haystack) >= min_partial_length and has_meaningful_overlap(haystack, needle, min_partial_length)
+            ):
+                found = slot
+                break
+
+        # Then try adjacent slots because SRT may split one AI scene phrase.
+        if found is None:
+            for start_position, slot in enumerate(slots):
+                if slot.index in used_indices:
+                    continue
+                joined = normalize_match_text(slot.text)
+                if not has_meaningful_overlap(joined, needle, min_partial_length):
+                    continue
+                for next_slot in slots[start_position + 1 : start_position + max_joined_slots]:
+                    joined += normalize_match_text(next_slot.text)
+                    if needle in joined or joined in needle:
+                        found = slot
+                        break
+                if found is not None:
+                    break
+
+        # Finally, use fuzzy matching for lightly reworded SRT text.
+        if found is None:
+            best_slot: Slot | None = None
+            best_score = 0.0
+            for start_position, slot in enumerate(slots):
+                if slot.index in used_indices:
+                    continue
+                joined = ""
+                for next_slot in slots[start_position : start_position + max_joined_slots]:
+                    joined += normalize_match_text(next_slot.text)
+                    score = text_similarity(joined, needle)
+                    if score > best_score:
+                        best_score = score
+                        best_slot = slot
+            if best_slot is not None and best_score >= min_similarity:
+                found = best_slot
+
+        if found is None:
+            missing.append(narration)
+            continue
+        used_indices.add(found.index)
+        matches.append((found, narration))
+
+    matches.sort(key=lambda item: item[0].index)
+    return matches, missing
+
+
+def build_scene_table_placements(slots: list[Slot], videos: list[Path], narrations: list[str]) -> tuple[list[Placement], list[str]]:
+    matches, missing = find_scene_start_slots(slots, narrations)
+    if not matches:
+        raise ValueError("AI 장면표 문구와 SRT 대사가 하나도 매칭되지 않았습니다.")
+    if len(videos) < len(matches):
+        raise ValueError(f"영상 파일이 부족합니다. 장면 {len(matches)}개, 영상 {len(videos)}개입니다.")
+
+    starts_by_index = {slot.index: videos[position] for position, (slot, _narration) in enumerate(matches)}
+    placements: list[Placement] = []
+    has_started = False
+    for slot in slots:
+        video = starts_by_index.get(slot.index)
+        if video is not None:
+            placements.append(Placement(slot=slot, action="video", video=video))
+            has_started = True
+        elif has_started:
+            placements.append(Placement(slot=slot, action="hold", video=None))
+        else:
+            placements.append(Placement(slot=slot, action="blank", video=None))
+    return placements, missing
 
 
 def build_placements(
@@ -920,6 +1068,9 @@ class App(tk.Tk):
         ttk.Button(actions, text="2. Excel 작업표 만들기", command=self.save_work_csv).pack(
             side=tk.LEFT, padx=(0, 8)
         )
+        ttk.Button(actions, text="AI 장면표로 매핑", command=self.import_scene_table).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
         self.start_button = ttk.Button(
             actions,
             text="5. 최종 영상 생성",
@@ -1130,6 +1281,70 @@ class App(tk.Tk):
             messagebox.showinfo("완료", "CSV 작업표를 저장했습니다.")
         except Exception as exc:
             messagebox.showerror("CSV 저장 실패", str(exc))
+
+    def import_scene_table(self) -> None:
+        srt_text = self.srt_var.get().strip()
+        video_dir_text = self.video_dir_var.get().strip()
+        if not srt_text:
+            messagebox.showerror("입력 확인", "먼저 SRT 파일을 선택하세요.")
+            return
+        if not video_dir_text:
+            messagebox.showerror("입력 확인", "먼저 영상 폴더를 선택하세요.")
+            return
+
+        srt = Path(srt_text)
+        video_dir = Path(video_dir_text)
+        if not srt.exists():
+            messagebox.showerror("입력 확인", "SRT 파일을 찾을 수 없습니다.")
+            return
+        if not video_dir.exists() or not video_dir.is_dir():
+            messagebox.showerror("입력 확인", "영상 폴더를 찾을 수 없습니다.")
+            return
+
+        scene_table_path = filedialog.askopenfilename(
+            title="AI 장면표 선택",
+            filetypes=[("CSV/TSV files", "*.csv *.tsv *.txt"), ("All files", "*.*")],
+        )
+        if not scene_table_path:
+            return
+
+        default_name = srt.with_suffix(".ai_mapping.csv").name
+        output_path = filedialog.asksaveasfilename(
+            title="AI 장면표 매핑 CSV 저장",
+            initialfile=default_name,
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+        )
+        if not output_path:
+            return
+
+        try:
+            captions = read_srt_captions(srt)
+            slots = build_slots(captions, float(self.last_duration_var.get()))
+            videos = discover_videos(video_dir)
+            narrations = read_scene_table(Path(scene_table_path))
+            placements, missing = build_scene_table_placements(slots, videos, narrations)
+            write_work_csv(Path(output_path), placements)
+            self.csv_var.set(output_path)
+            self.refresh_preview()
+            self.log("")
+            self.log(f"AI 장면표 매핑 CSV 저장: {output_path}")
+            self.log(f"매칭된 장면: {len(narrations) - len(missing)}개 / {len(narrations)}개")
+            if missing:
+                self.log("매칭 실패 문구:")
+                for narration in missing[:20]:
+                    self.log(f"- {narration}")
+                if len(missing) > 20:
+                    self.log(f"- 외 {len(missing) - 20}개")
+                messagebox.showwarning(
+                    "일부 매칭 실패",
+                    "AI 장면표 매핑 CSV를 저장했지만 일부 문구를 SRT에서 찾지 못했습니다. 작업 로그를 확인하세요.",
+                )
+            else:
+                messagebox.showinfo("완료", "AI 장면표 매핑 CSV를 저장했습니다.")
+        except Exception as exc:
+            self.log(f"AI 장면표 매핑 오류: {exc}")
+            messagebox.showerror("AI 장면표 매핑 실패", str(exc))
 
     def start(self) -> None:
         if self.worker and self.worker.is_alive():
