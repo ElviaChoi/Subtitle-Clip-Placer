@@ -47,6 +47,7 @@ class Placement:
     action: str
     video: Path | None
     effect: str = ""
+    effect_duration: float | None = None
 
 
 @dataclass
@@ -55,6 +56,7 @@ class RenderRun:
     video: Path | None
     slots: list[Slot]
     effect: str = ""
+    effect_duration: float | None = None
 
     @property
     def duration(self) -> float:
@@ -232,6 +234,12 @@ def normalize_effect(value: str) -> str:
     raw = value.strip().lower().replace(" ", "")
     if raw in {"", "없음", "none", "no", "off"}:
         return ""
+    if raw in {"부드럽게", "smooth", "soft", "gentle"}:
+        return "부드럽게"
+    if raw in {"움직임", "이동", "패닝", "pan", "move"}:
+        return "움직임"
+    if raw in {"강조", "emphasis", "highlight", "impact"}:
+        return "강조"
     if raw in {"줌인", "확대", "zoomin"}:
         return "줌인"
     if raw in {"줌아웃", "축소", "zoomout"}:
@@ -239,6 +247,58 @@ def normalize_effect(value: str) -> str:
     if raw in {"페이드", "fade", "fadeinout"}:
         return "페이드"
     raise ValueError(f"지원하지 않는 효과 값입니다: {value}")
+
+
+def parse_optional_seconds(value: str, label: str) -> float | None:
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{label} 값이 숫자가 아닙니다: {value}") from exc
+    if seconds <= 0:
+        raise ValueError(f"{label} 값은 0보다 커야 합니다: {value}")
+    return seconds
+
+
+def effect_help_text() -> str:
+    return "이미지 효과: 없음 / 부드럽게 / 움직임 / 강조 / 줌인 / 줌아웃 / 페이드"
+
+
+def effect_help_detail() -> str:
+    return (
+        "CSV의 '효과' 칸에 아래 값 중 하나를 입력합니다.\n\n"
+        "추천 효과\n"
+        "- 없음: 정지 이미지\n"
+        "- 부드럽게: 약한 줌인 + 페이드\n"
+        "- 움직임: 좌우로 천천히 이동\n"
+        "- 강조: 초반 빠른 줌인 + 짧은 페이드인\n\n"
+        "직접 효과\n"
+        "- 줌인: 지정 시간 동안 확대\n"
+        "- 줌아웃: 지정 시간 동안 축소\n"
+        "- 페이드: 시작/끝 페이드\n\n"
+        "'효과시간초' 칸은 비워두면 자동값을 사용합니다.\n"
+        "필요할 때만 0.8, 1, 2 같은 초 단위 숫자를 입력하세요."
+    )
+
+
+def effect_tooltip_text() -> str:
+    return (
+        "효과 칸 예시\n"
+        "부드럽게: 약한 줌인 + 페이드\n"
+        "움직임: 좌우 이동\n"
+        "강조: 초반 빠른 줌인\n"
+        "효과시간초는 비우면 자동"
+    )
+
+
+def display_effect(effect: str, effect_duration: float | None = None) -> str:
+    if not effect:
+        return ""
+    if effect_duration is None:
+        return effect
+    return f"{effect} ({effect_duration:g}s)"
 
 
 def is_image_file(path: Path | None) -> bool:
@@ -261,7 +321,7 @@ def action_label(action: str) -> str:
     return action
 
 
-def read_csv_placement_overrides(csv_path: Path, video_folder: Path) -> dict[int, tuple[str, Path | None, str]]:
+def read_csv_placement_overrides(csv_path: Path, video_folder: Path) -> dict[int, tuple[str, Path | None, str, float | None]]:
     with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
         if not reader.fieldnames:
@@ -270,15 +330,17 @@ def read_csv_placement_overrides(csv_path: Path, video_folder: Path) -> dict[int
         video_key = "영상파일" if "영상파일" in reader.fieldnames else None
         action_key = "작업" if "작업" in reader.fieldnames else None
         effect_key = "효과" if "효과" in reader.fieldnames else None
+        effect_duration_key = "효과시간초" if "효과시간초" in reader.fieldnames else None
         if number_key is None or video_key is None:
             raise ValueError("CSV에는 '번호'와 '영상파일' 열이 있어야 합니다.")
 
-        mapping: dict[int, tuple[str, Path | None, str]] = {}
+        mapping: dict[int, tuple[str, Path | None, str, float | None]] = {}
         for row in reader:
             raw_number = (row.get(number_key) or "").strip()
             raw_video = (row.get(video_key) or "").strip()
             raw_action = (row.get(action_key) or "").strip() if action_key else ""
             raw_effect = (row.get(effect_key) or "").strip() if effect_key else ""
+            raw_effect_duration = (row.get(effect_duration_key) or "").strip() if effect_duration_key else ""
             if not raw_number:
                 continue
             try:
@@ -293,7 +355,8 @@ def read_csv_placement_overrides(csv_path: Path, video_folder: Path) -> dict[int
                 # In Excel, users often leave 영상파일 blank to continue the previous clip.
                 action = "hold"
             effect = normalize_effect(raw_effect) if action == "video" and is_image_file(video) else ""
-            mapping[number] = (action, video, effect)
+            effect_duration = parse_optional_seconds(raw_effect_duration, "효과시간초") if effect else None
+            mapping[number] = (action, video, effect, effect_duration)
     return mapping
 
 
@@ -352,13 +415,14 @@ def build_placements(
 
     if csv_path and csv_path.exists():
         mapping = read_csv_placement_overrides(csv_path, video_folder)
-        for index, (action, video, effect) in mapping.items():
+        for index, (action, video, effect, effect_duration) in mapping.items():
             if 1 <= index <= slot_count:
                 placements[index - 1] = Placement(
                     slot=slots[index - 1],
                     action=action,
                     video=video,
                     effect=effect,
+                    effect_duration=effect_duration,
                 )
     return placements
 
@@ -367,7 +431,7 @@ def write_work_csv(path: Path, placements: list[Placement]) -> None:
     with path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(
             file,
-            fieldnames=["번호", "시작시간", "길이초", "대사", "작업", "영상파일", "효과"],
+            fieldnames=["번호", "시작시간", "길이초", "대사", "작업", "영상파일", "효과", "효과시간초"],
         )
         writer.writeheader()
         for placement in placements:
@@ -381,6 +445,7 @@ def write_work_csv(path: Path, placements: list[Placement]) -> None:
                     "작업": action_label(placement.action),
                     "영상파일": placement.video.name if placement.video else "",
                     "효과": placement.effect,
+                    "효과시간초": f"{placement.effect_duration:g}" if placement.effect_duration is not None else "",
                 }
             )
 
@@ -412,6 +477,7 @@ def build_render_runs(placements: list[Placement]) -> list[RenderRun]:
                 video=placement.video,
                 slots=[placement.slot],
                 effect=placement.effect,
+                effect_duration=placement.effect_duration,
             )
             runs.append(current)
             continue
@@ -498,8 +564,28 @@ def normalize_filter(width: int, height: int, extra: str | None = None) -> str:
     return base
 
 
-def image_filter(width: int, height: int, duration: float, effect: str) -> str:
+def clamp_effect_seconds(duration: float, effect_duration: float | None, default_seconds: float) -> float:
+    seconds = default_seconds if effect_duration is None else effect_duration
+    return max(1 / 30, min(duration, seconds))
+
+
+def fade_filter(duration: float, effect_duration: float | None = None, default_max: float = 0.6) -> str:
+    if effect_duration is None:
+        fade_duration = min(default_max, max(0.1, duration / 3))
+    else:
+        fade_duration = effect_duration
+    fade_duration = max(1 / 30, min(duration / 2, fade_duration))
+    fade_out_start = max(0.0, duration - fade_duration)
+    return (
+        f"fade=t=in:st=0:d={fade_duration:.3f},"
+        f"fade=t=out:st={fade_out_start:.3f}:d={fade_duration:.3f}"
+    )
+
+
+def image_filter(width: int, height: int, duration: float, effect: str, effect_duration: float | None = None) -> str:
     frames = max(1, int(math.ceil(duration * 30)))
+    effect_seconds = clamp_effect_seconds(duration, effect_duration, duration)
+    effect_frames = max(1, min(frames, int(math.ceil(effect_seconds * 30))))
     large_width = width * 2
     large_height = height * 2
     fit_large = (
@@ -511,25 +597,45 @@ def image_filter(width: int, height: int, duration: float, effect: str) -> str:
     if effect == "줌인":
         return (
             f"{fit_large},"
-            f"zoompan=z='min(1+0.12*on/{frames},1.12)':{center}:d={frames}:s={width}x{height}:fps=30,"
+            f"zoompan=z='min(1+0.12*min(on,{effect_frames})/{effect_frames},1.12)':{center}:d={frames}:s={width}x{height}:fps=30,"
             "format=yuv420p"
         )
     if effect == "줌아웃":
         return (
             f"{fit_large},"
-            f"zoompan=z='max(1.12-0.12*on/{frames},1)':{center}:d={frames}:s={width}x{height}:fps=30,"
+            f"zoompan=z='max(1.12-0.12*min(on,{effect_frames})/{effect_frames},1)':{center}:d={frames}:s={width}x{height}:fps=30,"
             "format=yuv420p"
+        )
+    if effect == "부드럽게":
+        fade = fade_filter(duration, default_max=0.5)
+        return (
+            f"{fit_large},"
+            f"zoompan=z='min(1+0.08*min(on,{effect_frames})/{effect_frames},1.08)':{center}:d={frames}:s={width}x{height}:fps=30,"
+            f"{fade},format=yuv420p"
+        )
+    if effect == "움직임":
+        pan_seconds = clamp_effect_seconds(duration, effect_duration, duration)
+        pan_frames = max(1, min(frames, int(math.ceil(pan_seconds * 30))))
+        x = f"x='(iw-iw/zoom)*min(on,{pan_frames})/{pan_frames}'"
+        y = "y='ih/2-(ih/zoom/2)'"
+        return (
+            f"{fit_large},"
+            f"zoompan=z='1.12':{x}:{y}:d={frames}:s={width}x{height}:fps=30,"
+            "format=yuv420p"
+        )
+    if effect == "강조":
+        emphasis_seconds = clamp_effect_seconds(duration, effect_duration, min(1.0, duration))
+        emphasis_frames = max(1, min(frames, int(math.ceil(emphasis_seconds * 30))))
+        fade_in = min(0.2, duration / 2)
+        return (
+            f"{fit_large},"
+            f"zoompan=z='min(1+0.15*min(on,{emphasis_frames})/{emphasis_frames},1.15)':{center}:d={frames}:s={width}x{height}:fps=30,"
+            f"fade=t=in:st=0:d={fade_in:.3f},format=yuv420p"
         )
 
     base = normalize_filter(width, height)
     if effect == "페이드":
-        fade_duration = min(0.6, max(0.1, duration / 3))
-        fade_out_start = max(0.0, duration - fade_duration)
-        return (
-            f"{base},"
-            f"fade=t=in:st=0:d={fade_duration:.3f},"
-            f"fade=t=out:st={fade_out_start:.3f}:d={fade_duration:.3f}"
-        )
+        return f"{base},{fade_filter(duration, effect_duration)}"
     return base
 
 
@@ -553,9 +659,10 @@ def render_image_segment(
     width: int,
     height: int,
     effect: str,
+    effect_duration: float | None,
     log,
 ) -> str:
-    vf = image_filter(width, height, slot_duration, effect)
+    vf = image_filter(width, height, slot_duration, effect, effect_duration)
     command = [
         ffmpeg,
         "-y",
@@ -579,7 +686,7 @@ def render_image_segment(
         str(output),
     ]
     run_process(command, log)
-    effect_text = effect if effect else "효과 없음"
+    effect_text = display_effect(effect, effect_duration) if effect else "효과 없음"
     return f"이미지 {effect_text} ({slot_duration:.2f}s)"
 
 
@@ -811,7 +918,7 @@ def build_video(
             else:
                 assert run.video is not None
                 media_type = "이미지" if is_image_file(run.video) else "영상"
-                effect_text = f", 효과: {run.effect}" if is_image_file(run.video) and run.effect else ""
+                effect_text = f", 효과: {display_effect(run.effect, run.effect_duration)}" if is_image_file(run.video) and run.effect else ""
                 log(
                     f"[{run_index}/{len(runs)}] {slot_numbers}번 대사 -> {media_type} {run.video.name} "
                     f"{run.start:.2f}s~{run.end:.2f}s ({run.duration:.2f}s){effect_text}"
@@ -825,6 +932,7 @@ def build_video(
                         width=width,
                         height=height,
                         effect=run.effect,
+                        effect_duration=run.effect_duration,
                         log=log,
                     )
                 else:
@@ -853,6 +961,55 @@ def build_video(
             log(f"임시 파일 보관: {temp_root}")
         else:
             shutil.rmtree(temp_root, ignore_errors=True)
+
+
+class Tooltip:
+    def __init__(self, widget: tk.Widget, text: str, delay_ms: int = 450) -> None:
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self.after_id: str | None = None
+        self.tip: tk.Toplevel | None = None
+        widget.bind("<Enter>", self.schedule, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<ButtonPress>", self.hide, add="+")
+
+    def schedule(self, _event=None) -> None:
+        self.cancel()
+        self.after_id = self.widget.after(self.delay_ms, self.show)
+
+    def cancel(self) -> None:
+        if self.after_id is not None:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+
+    def show(self) -> None:
+        self.after_id = None
+        if self.tip is not None:
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+        frame = tk.Frame(self.tip, background="#1f2937", borderwidth=1, relief=tk.SOLID)
+        frame.pack()
+        tk.Label(
+            frame,
+            text=self.text,
+            justify=tk.LEFT,
+            background="#1f2937",
+            foreground="#ffffff",
+            padx=14,
+            pady=12,
+            font=("Malgun Gothic", 11),
+        ).pack()
+
+    def hide(self, _event=None) -> None:
+        self.cancel()
+        if self.tip is not None:
+            self.tip.destroy()
+            self.tip = None
 
 
 class App(tk.Tk):
@@ -913,18 +1070,19 @@ class App(tk.Tk):
             font=("Malgun Gothic", 10, "bold"),
         )
         style.configure("App.TLabel", background="#f3f5f7", foreground="#243043")
+        style.configure("Guide.TLabel", background="#f3f5f7", foreground="#223047", font=("Malgun Gothic", 9, "bold"))
         style.configure("Panel.TFrame", background="#ffffff")
         style.configure("Panel.TLabel", background="#ffffff", foreground="#243043")
         style.configure("Muted.TLabel", background="#ffffff", foreground="#697386")
-        style.configure("Status.TLabel", background="#f3f5f7", foreground="#3b4758")
+        style.configure("Status.TLabel", background="#f3f5f7", foreground="#1f5f9f", font=("Malgun Gothic", 10, "bold"))
         style.configure("TEntry", padding=(8, 6), font=("Malgun Gothic", 10))
         style.configure("TCombobox", padding=(8, 7), arrowsize=18, font=("Malgun Gothic", 10))
         style.configure("TSpinbox", padding=(8, 6), arrowsize=14, font=("Malgun Gothic", 10))
         style.configure("TButton", padding=(12, 7), font=("Malgun Gothic", 9))
         style.configure(
             "Primary.TButton",
-            padding=(16, 7),
-            font=("Malgun Gothic", 9, "bold"),
+            padding=(18, 8),
+            font=("Malgun Gothic", 10, "bold"),
         )
         style.configure("Treeview", rowheight=26, font=("Malgun Gothic", 9))
         style.configure("Treeview.Heading", font=("Malgun Gothic", 9, "bold"))
@@ -1050,57 +1208,59 @@ class App(tk.Tk):
             variable=self.keep_temp_var,
         ).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
 
-        hint = ttk.Label(
-            root,
-            text=(
-                "자동 모드: 영상이 슬롯보다 조금 짧으면 느리게 늘리고, "
-                "많이 짧으면 반복 후 자릅니다. 영상 소리는 제거됩니다."
-            ),
-            style="App.TLabel",
-        )
-        hint.pack(fill=tk.X, pady=(8, 8))
-
-        effect_hint = ttk.Label(
-            root,
-            text="이미지 효과 값: 없음 / 줌인 / 줌아웃 / 페이드",
-            style="App.TLabel",
-        )
-        effect_hint.pack(fill=tk.X, pady=(0, 8))
-
         actions = ttk.Frame(root, style="App.TFrame")
-        actions.pack(fill=tk.X, pady=(0, 10))
-        ttk.Button(actions, text="1. 대사/영상 확인", command=self.refresh_preview).pack(
+        actions.pack(fill=tk.X, pady=(8, 8))
+        ttk.Button(actions, text="1. 미리보기 확인", command=self.refresh_preview).pack(
             side=tk.LEFT, padx=(0, 8)
         )
-        ttk.Button(actions, text="2. Excel 작업표 만들기", command=self.save_work_csv).pack(
+        ttk.Button(actions, text="2. CSV 작업표 만들기", command=self.save_work_csv).pack(
             side=tk.LEFT, padx=(0, 8)
         )
-        ttk.Button(actions, text="AI 장면표로 매핑", command=self.import_scene_table).pack(
+        ttk.Button(actions, text="3. AI 장면표 매핑", command=self.import_scene_table).pack(
             side=tk.LEFT, padx=(0, 8)
         )
         self.start_button = ttk.Button(
             actions,
-            text="5. 최종 영상 생성",
+            text="4. 최종 영상 생성",
             command=self.start,
             style="Primary.TButton",
         )
-        self.start_button.pack(side=tk.LEFT)
+        self.start_button.pack(side=tk.LEFT, padx=(4, 0))
         ttk.Button(actions, text="로그 지우기", command=self.clear_log).pack(
-            side=tk.LEFT, padx=8
+            side=tk.LEFT, padx=(12, 0)
         )
 
-        guide = ttk.Label(
-            root,
-            text="흐름: SRT/영상 폴더 선택 -> AI 장면표 매핑 또는 Excel 작업표 만들기 -> 미리보기 확인 -> 최종 영상 생성",
-            style="App.TLabel",
+        guide_panel = ttk.LabelFrame(root, text="사용 안내", padding=(10, 8), style="Panel.TLabelframe")
+        guide_panel.pack(fill=tk.X, pady=(0, 10))
+        guide_panel.columnconfigure(0, weight=1)
+        ttk.Label(
+            guide_panel,
+            text="사용 순서: SRT/영상 폴더 선택 -> CSV 작업표 만들기 또는 AI 장면표 매핑 -> 미리보기 확인 -> 최종 영상 생성",
+            style="Panel.TLabel",
+        ).grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(
+            guide_panel,
+            text=effect_help_text() + "  |  효과시간초는 비우면 자동",
+            style="Panel.TLabel",
+        ).grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
+        ttk.Label(
+            guide_panel,
+            text="자동 모드: 영상이 조금 짧으면 느리게 늘리고, 많이 짧으면 반복 후 자릅니다. 영상 소리는 제거됩니다.",
+            style="Muted.TLabel",
+        ).grid(row=2, column=0, sticky=tk.W, pady=(6, 0))
+        effect_help_button = ttk.Button(
+            guide_panel,
+            text="효과 도움말",
+            command=self.show_effect_help,
         )
-        guide.pack(fill=tk.X, pady=(0, 8))
+        effect_help_button.grid(row=0, column=1, rowspan=3, sticky=tk.E, padx=(12, 0))
+        Tooltip(effect_help_button, effect_tooltip_text())
 
         status_row = ttk.Frame(root, style="App.TFrame")
         status_row.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(status_row, text="상태", style="App.TLabel").pack(side=tk.LEFT)
+        ttk.Label(status_row, text="현재 상태:", style="Guide.TLabel").pack(side=tk.LEFT)
         ttk.Label(status_row, textvariable=self.status_var, style="Status.TLabel").pack(
-            side=tk.LEFT, padx=(10, 0)
+            side=tk.LEFT, padx=(8, 0)
         )
 
         workspace = ttk.Frame(root, style="App.TFrame")
@@ -1128,7 +1288,7 @@ class App(tk.Tk):
         self.preview_tree.column("duration", width=80, anchor=tk.CENTER, stretch=False)
         self.preview_tree.column("caption", width=320, anchor=tk.W)
         self.preview_tree.column("action", width=82, anchor=tk.CENTER, stretch=False)
-        self.preview_tree.column("effect", width=74, anchor=tk.CENTER, stretch=False)
+        self.preview_tree.column("effect", width=120, anchor=tk.CENTER, stretch=False)
         self.preview_tree.column("video", width=240, anchor=tk.W)
         self.preview_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         preview_scroll = ttk.Scrollbar(preview_frame, command=self.preview_tree.yview)
@@ -1170,6 +1330,38 @@ class App(tk.Tk):
         state = tk.NORMAL if self.mode_var.get() == "자동" else tk.DISABLED
         self.threshold_spinbox.configure(state=state)
         self.threshold_hint.configure(state=state)
+
+    def show_effect_help(self) -> None:
+        popup = tk.Toplevel(self)
+        popup.title("이미지 효과 도움말")
+        popup.configure(bg="#ffffff")
+        popup.transient(self)
+        popup.resizable(False, False)
+
+        body = tk.Frame(popup, bg="#ffffff", padx=18, pady=16)
+        body.pack(fill=tk.BOTH, expand=True)
+        tk.Label(
+            body,
+            text="이미지 효과 도움말",
+            bg="#ffffff",
+            fg="#182235",
+            font=("Malgun Gothic", 12, "bold"),
+        ).pack(anchor=tk.W, pady=(0, 10))
+        tk.Label(
+            body,
+            text=effect_help_detail(),
+            justify=tk.LEFT,
+            bg="#ffffff",
+            fg="#243043",
+            font=("Malgun Gothic", 11),
+        ).pack(anchor=tk.W)
+        ttk.Button(body, text="확인", command=popup.destroy).pack(anchor=tk.E, pady=(14, 0))
+
+        popup.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - popup.winfo_width()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - popup.winfo_height()) // 2)
+        popup.geometry(f"+{x}+{y}")
+        popup.grab_set()
 
     def browse_srt(self) -> None:
         path = filedialog.askopenfilename(
@@ -1269,7 +1461,7 @@ class App(tk.Tk):
                     f"{slot.duration:.2f}s",
                     caption,
                     display_action(placement),
-                    placement.effect if placement.effect else "",
+                    display_effect(placement.effect, placement.effect_duration),
                     placement.video.name if placement.video else "",
                 ),
             )
@@ -1305,7 +1497,7 @@ class App(tk.Tk):
             write_work_csv(Path(path), placements)
             self.csv_var.set(path)
             self.refresh_preview()
-            self.log("이미지 효과 값: 없음 / 줌인 / 줌아웃 / 페이드")
+            self.log(effect_help_text())
             messagebox.showinfo("완료", "CSV 작업표를 저장했습니다.")
         except Exception as exc:
             messagebox.showerror("CSV 저장 실패", str(exc))
@@ -1353,7 +1545,7 @@ class App(tk.Tk):
             self.log("")
             self.log(f"AI 장면표 매핑 CSV 저장: {output_path}")
             self.log(f"영상 시작 번호: {int(self.video_start_number_var.get())}")
-            self.log("이미지 효과 값: 없음 / 줌인 / 줌아웃 / 페이드")
+            self.log(effect_help_text())
             self.log(f"매칭된 장면: {len(narrations) - len(missing)}개 / {len(narrations)}개")
             if missing:
                 self.log("매칭 실패 문구:")
