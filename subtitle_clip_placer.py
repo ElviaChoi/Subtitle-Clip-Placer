@@ -128,16 +128,34 @@ def read_srt_captions(path: Path) -> list[Caption]:
     return captions
 
 
-def build_slots(captions: list[Caption], last_duration: float) -> list[Slot]:
-    slots: list[Slot] = []
+def build_slots(
+    captions: list[Caption],
+    last_duration: float,
+    start_index: int = 1,
+    end_index: int | None = None,
+) -> list[Slot]:
+    if start_index < 1:
+        raise ValueError("작업 시작 번호는 1 이상이어야 합니다.")
+    if end_index is not None and end_index < start_index:
+        raise ValueError("작업 종료 번호는 시작 번호보다 크거나 같아야 합니다.")
+
+    all_slots: list[Slot] = []
     for index, caption in enumerate(captions):
         start = caption.start
         end = captions[index + 1].start if index + 1 < len(captions) else start + last_duration
         if end <= start:
             continue
-        slots.append(Slot(index=index + 1, start=start, end=end, text=caption.text))
-    if not slots:
+        all_slots.append(Slot(index=index + 1, start=start, end=end, text=caption.text))
+    if not all_slots:
         raise ValueError("유효한 자막 구간을 만들 수 없습니다.")
+    slots = [
+        slot
+        for slot in all_slots
+        if slot.index >= start_index and (end_index is None or slot.index <= end_index)
+    ]
+    if not slots:
+        available = f"1-{all_slots[-1].index}"
+        raise ValueError(f"작업 범위에 해당하는 자막이 없습니다. 사용 가능한 번호: {available}")
     return slots
 
 
@@ -360,16 +378,16 @@ def read_csv_placement_overrides(csv_path: Path, video_folder: Path) -> dict[int
     return mapping
 
 
-def build_scene_table_placements(slots: list[Slot], videos: list[Path], narrations: list[str]) -> tuple[list[Placement], list[str]]:
-    matches, missing = find_scene_start_slots(slots, narrations)
+def build_scene_table_placements(slots: list[Slot], videos: list[Path], cues) -> tuple[list[Placement], list[str]]:
+    matches, missing = find_scene_start_slots(slots, cues)
     if not matches:
-        return [Placement(slot=slot, action="blank", video=None) for slot in slots], list(narrations)
+        return [Placement(slot=slot, action="blank", video=None) for slot in slots], [cue.narration for cue in cues]
 
     available_matches = matches[: len(videos)]
     if len(videos) < len(matches):
-        missing.extend(narration for _slot, narration in matches[len(videos) :])
+        missing.extend(cue.narration for _slot, cue in matches[len(videos) :])
 
-    starts_by_index = {slot.index: videos[position] for position, (slot, _narration) in enumerate(available_matches)}
+    starts_by_index = {slot.index: videos[position] for position, (slot, _cue) in enumerate(available_matches)}
     placements: list[Placement] = []
     has_started = False
     for slot in slots:
@@ -391,22 +409,28 @@ def build_placements(
     csv_path: Path | None = None,
 ) -> list[Placement]:
     slot_count = len(slots)
-    matched: list[Path | None]
-    try:
-        matched = list(match_videos_to_slots(videos, slot_count))
-    except Exception:
-        video_by_number = {
-            number: video
-            for video in videos
-            if (number := leading_number(video)) is not None
-        }
-        if video_by_number:
-            matched = [video_by_number.get(position) for position in range(1, slot_count + 1)]
+    video_by_number: dict[int, Path] = {}
+    duplicates: list[int] = []
+    for video in videos:
+        number = leading_number(video)
+        if number is None:
+            continue
+        if number in video_by_number:
+            duplicates.append(number)
         else:
-            matched = [
-                videos[position - 1] if position - 1 < len(videos) else None
-                for position in range(1, slot_count + 1)
-            ]
+            video_by_number[number] = video
+
+    if duplicates:
+        duplicate_text = ", ".join(str(number) for number in sorted(set(duplicates)))
+        raise ValueError(f"같은 앞번호를 가진 영상이 있습니다: {duplicate_text}")
+
+    if video_by_number:
+        matched: list[Path | None] = [video_by_number.get(slot.index) for slot in slots]
+    else:
+        matched = [
+            videos[position - 1] if position - 1 < len(videos) else None
+            for position in range(1, slot_count + 1)
+        ]
 
     placements = [
         Placement(slot=slot, action="video" if video else "blank", video=video)
@@ -415,10 +439,12 @@ def build_placements(
 
     if csv_path and csv_path.exists():
         mapping = read_csv_placement_overrides(csv_path, video_folder)
+        slot_positions = {slot.index: position for position, slot in enumerate(slots)}
         for index, (action, video, effect, effect_duration) in mapping.items():
-            if 1 <= index <= slot_count:
-                placements[index - 1] = Placement(
-                    slot=slots[index - 1],
+            position = slot_positions.get(index)
+            if position is not None:
+                placements[position] = Placement(
+                    slot=slots[position],
                     action=action,
                     video=video,
                     effect=effect,
@@ -860,6 +886,8 @@ def build_video(
     mode: str,
     threshold: float,
     last_duration: float,
+    start_index: int,
+    end_index: int | None,
     keep_temp: bool,
     log,
 ) -> None:
@@ -876,7 +904,7 @@ def build_video(
             )
 
     captions = read_srt_captions(srt_path)
-    slots = build_slots(captions, last_duration)
+    slots = build_slots(captions, last_duration, start_index, end_index)
     discovered_videos = discover_videos(video_folder)
     placements = build_placements(slots, discovered_videos, video_folder, csv_path)
     runs = build_render_runs(placements)
@@ -1034,6 +1062,8 @@ class App(tk.Tk):
         self.mode_var = tk.StringVar(value="반복 후 자르기")
         self.threshold_var = tk.DoubleVar(value=1.2)
         self.last_duration_var = tk.DoubleVar(value=8.0)
+        self.range_start_var = tk.IntVar(value=1)
+        self.range_end_var = tk.StringVar()
         self.video_start_number_var = tk.IntVar(value=1)
         self.keep_temp_var = tk.BooleanVar(value=False)
 
@@ -1178,6 +1208,7 @@ class App(tk.Tk):
         common_options = ttk.LabelFrame(options, text="공통", padding=10, style="Panel.TLabelframe")
         common_options.grid(row=0, column=1, sticky=tk.EW)
         common_options.columnconfigure(1, weight=1)
+        common_options.columnconfigure(3, weight=1)
         ttk.Label(common_options, text="마지막 자막 길이", style="Panel.TLabel").grid(
             row=0, column=0, sticky=tk.W, padx=(0, 8)
         )
@@ -1191,7 +1222,7 @@ class App(tk.Tk):
             font=("Malgun Gothic", 10),
         ).grid(row=0, column=1, sticky=tk.EW)
         ttk.Label(common_options, text="영상 시작 번호", style="Panel.TLabel").grid(
-            row=1, column=0, sticky=tk.W, padx=(0, 8), pady=(8, 0)
+            row=0, column=2, sticky=tk.W, padx=(14, 8)
         )
         ttk.Spinbox(
             common_options,
@@ -1201,12 +1232,33 @@ class App(tk.Tk):
             textvariable=self.video_start_number_var,
             width=8,
             font=("Malgun Gothic", 10),
+        ).grid(row=0, column=3, sticky=tk.EW)
+        ttk.Label(common_options, text="작업 시작 번호", style="Panel.TLabel").grid(
+            row=1, column=0, sticky=tk.W, padx=(0, 8), pady=(8, 0)
+        )
+        ttk.Spinbox(
+            common_options,
+            from_=1,
+            to=9999,
+            increment=1,
+            textvariable=self.range_start_var,
+            width=8,
+            font=("Malgun Gothic", 10),
         ).grid(row=1, column=1, sticky=tk.EW, pady=(8, 0))
+        ttk.Label(common_options, text="작업 종료 번호", style="Panel.TLabel").grid(
+            row=1, column=2, sticky=tk.W, padx=(14, 8), pady=(8, 0)
+        )
+        ttk.Entry(
+            common_options,
+            textvariable=self.range_end_var,
+            width=8,
+            font=("Malgun Gothic", 10),
+        ).grid(row=1, column=3, sticky=tk.EW, pady=(8, 0))
         ttk.Checkbutton(
             common_options,
             text="임시 파일 보관",
             variable=self.keep_temp_var,
-        ).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
+        ).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
 
         actions = ttk.Frame(root, style="App.TFrame")
         actions.pack(fill=tk.X, pady=(8, 8))
@@ -1406,6 +1458,22 @@ class App(tk.Tk):
         if path:
             self.ffmpeg_var.set(path)
 
+    def get_work_range(self) -> tuple[int, int | None]:
+        try:
+            start_index = int(self.range_start_var.get())
+        except (tk.TclError, ValueError) as exc:
+            raise ValueError("작업 시작 번호는 숫자여야 합니다.") from exc
+        raw_end = self.range_end_var.get().strip()
+        try:
+            end_index = int(raw_end) if raw_end else None
+        except ValueError as exc:
+            raise ValueError("작업 종료 번호는 비워두거나 숫자로 입력해야 합니다.") from exc
+        if start_index < 1:
+            raise ValueError("작업 시작 번호는 1 이상이어야 합니다.")
+        if end_index is not None and end_index < start_index:
+            raise ValueError("작업 종료 번호는 시작 번호보다 크거나 같아야 합니다.")
+        return start_index, end_index
+
     def validate(self) -> tuple[Path, Path, Path]:
         srt = Path(self.srt_var.get().strip())
         videos = Path(self.video_dir_var.get().strip())
@@ -1422,6 +1490,7 @@ class App(tk.Tk):
             raise ValueError("마지막 자막 길이는 0보다 커야 합니다.")
         if self.video_start_number_var.get() < 1:
             raise ValueError("영상 시작 번호는 1 이상이어야 합니다.")
+        self.get_work_range()
         return srt, videos, output
 
     def refresh_preview(self) -> None:
@@ -1440,7 +1509,8 @@ class App(tk.Tk):
 
         try:
             captions = read_srt_captions(srt)
-            slots = build_slots(captions, float(self.last_duration_var.get()))
+            start_index, end_index = self.get_work_range()
+            slots = build_slots(captions, float(self.last_duration_var.get()), start_index, end_index)
             videos = discover_videos(video_dir)
             csv_path = Path(self.csv_var.get().strip()) if self.csv_var.get().strip() else None
             placements = build_placements(slots, videos, video_dir, csv_path)
@@ -1448,7 +1518,7 @@ class App(tk.Tk):
             self.log(f"미리보기 오류: {exc}")
             return
 
-        for position, placement in enumerate(placements, start=1):
+        for placement in placements:
             slot = placement.slot
             caption = slot.text
             if len(caption) > 90:
@@ -1457,7 +1527,7 @@ class App(tk.Tk):
                 "",
                 tk.END,
                 values=(
-                    position,
+                    slot.index,
                     f"{slot.duration:.2f}s",
                     caption,
                     display_action(placement),
@@ -1490,7 +1560,8 @@ class App(tk.Tk):
 
         try:
             captions = read_srt_captions(srt)
-            slots = build_slots(captions, float(self.last_duration_var.get()))
+            start_index, end_index = self.get_work_range()
+            slots = build_slots(captions, float(self.last_duration_var.get()), start_index, end_index)
             videos = discover_videos(video_dir) if video_dir.exists() else []
             csv_path = Path(self.csv_var.get().strip()) if self.csv_var.get().strip() else None
             placements = build_placements(slots, videos, video_dir, csv_path)
@@ -1532,7 +1603,8 @@ class App(tk.Tk):
 
         try:
             captions = read_srt_captions(srt)
-            slots = build_slots(captions, float(self.last_duration_var.get()))
+            start_index, end_index = self.get_work_range()
+            slots = build_slots(captions, float(self.last_duration_var.get()), start_index, end_index)
             videos = filter_videos_from_start_number(
                 discover_videos(video_dir),
                 int(self.video_start_number_var.get()),
@@ -1571,6 +1643,7 @@ class App(tk.Tk):
             return
         try:
             srt, videos, output = self.validate()
+            start_index, end_index = self.get_work_range()
         except Exception as exc:
             messagebox.showerror("입력 확인", str(exc))
             return
@@ -1594,6 +1667,8 @@ class App(tk.Tk):
                     mode=self.mode_var.get(),
                     threshold=float(self.threshold_var.get()),
                     last_duration=float(self.last_duration_var.get()),
+                    start_index=start_index,
+                    end_index=end_index,
                     keep_temp=bool(self.keep_temp_var.get()),
                     log=self.log_queue.put,
                 )
