@@ -1067,11 +1067,8 @@ class Tooltip:
         self.after_id = None
         if self.tip is not None:
             return
-        x = self.widget.winfo_rootx() + 12
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
-        self.tip.wm_geometry(f"+{x}+{y}")
         frame = tk.Frame(self.tip, background="#1f2937", borderwidth=1, relief=tk.SOLID)
         frame.pack()
         tk.Label(
@@ -1084,6 +1081,27 @@ class Tooltip:
             pady=12,
             font=("Malgun Gothic", 11),
         ).pack()
+        self.tip.update_idletasks()
+
+        margin = 12
+        screen_width = self.widget.winfo_screenwidth()
+        screen_height = self.widget.winfo_screenheight()
+        tip_width = self.tip.winfo_reqwidth()
+        tip_height = self.tip.winfo_reqheight()
+        widget_x = self.widget.winfo_rootx()
+        widget_y = self.widget.winfo_rooty()
+
+        x = widget_x + 12
+        y = widget_y + self.widget.winfo_height() + 8
+        if x + tip_width + margin > screen_width:
+            x = screen_width - tip_width - margin
+        if x < margin:
+            x = margin
+        if y + tip_height + margin > screen_height:
+            y = widget_y - tip_height - 8
+        if y < margin:
+            y = margin
+        self.tip.wm_geometry(f"+{int(x)}+{int(y)}")
 
     def hide(self, _event=None) -> None:
         self.cancel()
