@@ -71,6 +71,10 @@ class RenderRun:
         return self.slots[-1].end
 
 
+class RenderCancelled(Exception):
+    pass
+
+
 def parse_srt_time(value: str) -> float:
     match = re.match(r"^\s*(\d+):(\d+):(\d+)[,.](\d+)\s*$", value)
     if not match:
@@ -522,7 +526,14 @@ def ffmpeg_pair(ffmpeg_text: str) -> tuple[str, str]:
     return "ffmpeg", "ffprobe"
 
 
-def run_process(command: list[str], log) -> None:
+def run_process(
+    command: list[str],
+    log,
+    cancel_event: threading.Event | None = None,
+    set_current_process=None,
+) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise RenderCancelled("작업이 중지되었습니다.")
     pretty = " ".join(f'"{part}"' if " " in part else part for part in command)
     log(pretty)
     process = subprocess.Popen(
@@ -534,14 +545,31 @@ def run_process(command: list[str], log) -> None:
         errors="replace",
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
-    assert process.stdout is not None
-    for line in process.stdout:
-        line = line.strip()
-        if line:
-            log(line)
-    return_code = process.wait()
-    if return_code != 0:
-        raise RuntimeError(f"FFmpeg 실행 실패, 종료 코드: {return_code}")
+    if set_current_process is not None:
+        set_current_process(process)
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            if cancel_event is not None and cancel_event.is_set():
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                raise RenderCancelled("작업이 중지되었습니다.")
+            line = line.strip()
+            if line:
+                log(line)
+        return_code = process.wait()
+        if cancel_event is not None and cancel_event.is_set():
+            raise RenderCancelled("작업이 중지되었습니다.")
+        if return_code != 0:
+            raise RuntimeError(f"FFmpeg 실행 실패, 종료 코드: {return_code}")
+    finally:
+        if set_current_process is not None:
+            set_current_process(None)
 
 
 def get_video_duration(ffprobe: str, video: Path) -> float:
@@ -687,6 +715,8 @@ def render_image_segment(
     effect: str,
     effect_duration: float | None,
     log,
+    cancel_event: threading.Event | None = None,
+    set_current_process=None,
 ) -> str:
     vf = image_filter(width, height, slot_duration, effect, effect_duration)
     command = [
@@ -711,7 +741,7 @@ def render_image_segment(
         "+faststart",
         str(output),
     ]
-    run_process(command, log)
+    run_process(command, log, cancel_event, set_current_process)
     effect_text = display_effect(effect, effect_duration) if effect else "효과 없음"
     return f"이미지 {effect_text} ({slot_duration:.2f}s)"
 
@@ -727,6 +757,8 @@ def render_segment(
     mode: str,
     threshold: float,
     log,
+    cancel_event: threading.Event | None = None,
+    set_current_process=None,
 ) -> str:
     video_duration = get_video_duration(ffprobe, video)
     selected = mode_for_slot(mode, slot_duration, video_duration, threshold)
@@ -754,7 +786,7 @@ def render_segment(
             "+faststart",
             str(output),
         ]
-        run_process(command, log)
+        run_process(command, log, cancel_event, set_current_process)
         return f"느리게 늘리기 ({video_duration:.2f}s -> {slot_duration:.2f}s)"
 
     if selected == "loop":
@@ -781,7 +813,7 @@ def render_segment(
             "+faststart",
             str(output),
         ]
-        run_process(command, log)
+        run_process(command, log, cancel_event, set_current_process)
         repeats = math.ceil(slot_duration / video_duration)
         return f"반복 후 자르기 ({video_duration:.2f}s x {repeats}회 -> {slot_duration:.2f}s)"
 
@@ -806,7 +838,7 @@ def render_segment(
         "+faststart",
         str(output),
     ]
-    run_process(command, log)
+    run_process(command, log, cancel_event, set_current_process)
     return f"자르기 ({video_duration:.2f}s -> {slot_duration:.2f}s)"
 
 
@@ -817,6 +849,8 @@ def render_black_segment(
     width: int,
     height: int,
     log,
+    cancel_event: threading.Event | None = None,
+    set_current_process=None,
 ) -> str:
     command = [
         ffmpeg,
@@ -840,11 +874,19 @@ def render_black_segment(
         "+faststart",
         str(output),
     ]
-    run_process(command, log)
+    run_process(command, log, cancel_event, set_current_process)
     return f"검은화면 ({duration:.2f}s)"
 
 
-def concat_segments(ffmpeg: str, segments: list[Path], output: Path, temp_dir: Path, log) -> None:
+def concat_segments(
+    ffmpeg: str,
+    segments: list[Path],
+    output: Path,
+    temp_dir: Path,
+    log,
+    cancel_event: threading.Event | None = None,
+    set_current_process=None,
+) -> None:
     concat_file = temp_dir / "concat.txt"
     lines = []
     for segment in segments:
@@ -873,7 +915,7 @@ def concat_segments(ffmpeg: str, segments: list[Path], output: Path, temp_dir: P
         "+faststart",
         str(output),
     ]
-    run_process(command, log)
+    run_process(command, log, cancel_event, set_current_process)
 
 
 def build_video(
@@ -890,6 +932,8 @@ def build_video(
     end_index: int | None,
     keep_temp: bool,
     log,
+    cancel_event: threading.Event | None = None,
+    set_current_process=None,
 ) -> None:
     ffmpeg, ffprobe = ffmpeg_pair(ffmpeg_text)
     if ffmpeg_text.strip():
@@ -925,6 +969,8 @@ def build_video(
     try:
         segments: list[Path] = []
         for run_index, run in enumerate(runs, start=1):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RenderCancelled("작업이 중지되었습니다.")
             segment = temp_root / f"segment_{run_index:04d}.mp4"
             log("")
             slot_numbers = f"{run.slots[0].index}"
@@ -942,6 +988,8 @@ def build_video(
                     width=width,
                     height=height,
                     log=log,
+                    cancel_event=cancel_event,
+                    set_current_process=set_current_process,
                 )
             else:
                 assert run.video is not None
@@ -962,6 +1010,8 @@ def build_video(
                         effect=run.effect,
                         effect_duration=run.effect_duration,
                         log=log,
+                        cancel_event=cancel_event,
+                        set_current_process=set_current_process,
                     )
                 else:
                     result = render_segment(
@@ -975,13 +1025,15 @@ def build_video(
                         mode=mode,
                         threshold=threshold,
                         log=log,
+                        cancel_event=cancel_event,
+                        set_current_process=set_current_process,
                     )
             log(f"처리 방식: {result}")
             segments.append(segment)
 
         log("")
         log("최종 영상을 합치는 중입니다.")
-        concat_segments(ffmpeg, segments, output_path, temp_root, log)
+        concat_segments(ffmpeg, segments, output_path, temp_root, log, cancel_event, set_current_process)
         log("")
         log(f"완료: {output_path}")
     finally:
@@ -1051,6 +1103,9 @@ class App(tk.Tk):
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.worker: threading.Thread | None = None
         self.last_error: str | None = None
+        self.cancel_event = threading.Event()
+        self.process_lock = threading.Lock()
+        self.current_process: subprocess.Popen | None = None
 
         self.status_var = tk.StringVar(value="대기 중")
         self.srt_var = tk.StringVar()
@@ -1278,6 +1333,13 @@ class App(tk.Tk):
             style="Primary.TButton",
         )
         self.start_button.pack(side=tk.LEFT, padx=(4, 0))
+        self.stop_button = ttk.Button(
+            actions,
+            text="중지",
+            command=self.stop_render,
+            state=tk.DISABLED,
+        )
+        self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(actions, text="로그 지우기", command=self.clear_log).pack(
             side=tk.LEFT, padx=(12, 0)
         )
@@ -1637,6 +1699,28 @@ class App(tk.Tk):
             self.log(f"AI 장면표 매핑 오류: {exc}")
             messagebox.showerror("AI 장면표 매핑 실패", str(exc))
 
+    def set_current_process(self, process: subprocess.Popen | None) -> None:
+        with self.process_lock:
+            self.current_process = process
+
+    def stop_render(self) -> None:
+        if not self.worker or not self.worker.is_alive():
+            return
+        self.cancel_event.set()
+        self.status_var.set("중지 중")
+        self.stop_button.configure(state=tk.DISABLED)
+        self.log("중지 요청을 보냈습니다.")
+        with self.process_lock:
+            process = self.current_process
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+
     def start(self) -> None:
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("작업 중", "이미 생성 작업이 진행 중입니다.")
@@ -1648,7 +1732,10 @@ class App(tk.Tk):
             messagebox.showerror("입력 확인", str(exc))
             return
 
+        self.cancel_event.clear()
+        self.set_current_process(None)
         self.start_button.configure(state=tk.DISABLED)
+        self.stop_button.configure(state=tk.NORMAL)
         self.status_var.set("영상 생성 중")
         self.last_error = None
         self.log("")
@@ -1671,8 +1758,13 @@ class App(tk.Tk):
                     end_index=end_index,
                     keep_temp=bool(self.keep_temp_var.get()),
                     log=self.log_queue.put,
+                    cancel_event=self.cancel_event,
+                    set_current_process=self.set_current_process,
                 )
                 self.log_queue.put("__DONE__")
+            except RenderCancelled as exc:
+                self.log_queue.put(str(exc))
+                self.log_queue.put("__CANCELLED__")
             except Exception as exc:
                 self.log_queue.put(f"오류: {exc}")
                 self.log_queue.put("__FAILED__")
@@ -1694,10 +1786,19 @@ class App(tk.Tk):
                 if message == "__DONE__":
                     self.status_var.set("완료")
                     self.start_button.configure(state=tk.NORMAL)
+                    self.stop_button.configure(state=tk.DISABLED)
+                    self.set_current_process(None)
                     messagebox.showinfo("완료", "영상 생성이 완료되었습니다.")
+                elif message == "__CANCELLED__":
+                    self.status_var.set("중지됨")
+                    self.start_button.configure(state=tk.NORMAL)
+                    self.stop_button.configure(state=tk.DISABLED)
+                    self.set_current_process(None)
                 elif message == "__FAILED__":
                     self.status_var.set("실패")
                     self.start_button.configure(state=tk.NORMAL)
+                    self.stop_button.configure(state=tk.DISABLED)
+                    self.set_current_process(None)
                     detail = f"\n\n마지막 오류:\n{self.last_error}" if self.last_error else ""
                     messagebox.showerror("실패", f"영상 생성에 실패했습니다. 작업 로그를 확인하세요.{detail}")
                 else:
