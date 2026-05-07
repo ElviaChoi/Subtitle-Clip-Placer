@@ -1114,8 +1114,8 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Subtitle Clip Placer")
-        self.geometry("1080x860")
-        self.minsize(940, 720)
+        self.geometry("1180x940")
+        self.minsize(1000, 820)
         self.configure(bg="#f3f5f7")
 
         self.log_queue: queue.Queue[str] = queue.Queue()
@@ -1362,34 +1362,24 @@ class App(tk.Tk):
             side=tk.LEFT, padx=(12, 0)
         )
 
-        guide_panel = ttk.LabelFrame(root, text="사용 안내", padding=(10, 8), style="Panel.TLabelframe")
-        guide_panel.pack(fill=tk.X, pady=(0, 10))
+        guide_panel = ttk.LabelFrame(root, text="사용 안내", padding=(10, 6), style="Panel.TLabelframe")
+        guide_panel.pack(fill=tk.X, pady=(0, 6))
         guide_panel.columnconfigure(0, weight=1)
         ttk.Label(
             guide_panel,
-            text="사용 순서: SRT/영상 폴더 선택 -> CSV 작업표 만들기 또는 AI 장면표 매핑 -> 미리보기 확인 -> 최종 영상 생성",
+            text="SRT/영상 폴더 선택 -> CSV 작업표 만들기 또는 AI 장면표 매핑 -> 미리보기 확인 -> 최종 영상 생성",
             style="Panel.TLabel",
         ).grid(row=0, column=0, sticky=tk.W)
-        ttk.Label(
-            guide_panel,
-            text=effect_help_text() + "  |  효과시간초는 비우면 자동",
-            style="Panel.TLabel",
-        ).grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
-        ttk.Label(
-            guide_panel,
-            text="자동 모드: 영상이 조금 짧으면 느리게 늘리고, 많이 짧으면 반복 후 자릅니다. 영상 소리는 제거됩니다.",
-            style="Muted.TLabel",
-        ).grid(row=2, column=0, sticky=tk.W, pady=(6, 0))
         effect_help_button = ttk.Button(
             guide_panel,
             text="효과 도움말",
             command=self.show_effect_help,
         )
-        effect_help_button.grid(row=0, column=1, rowspan=3, sticky=tk.E, padx=(12, 0))
+        effect_help_button.grid(row=0, column=1, sticky=tk.E, padx=(12, 0))
         Tooltip(effect_help_button, effect_tooltip_text())
 
         status_row = ttk.Frame(root, style="App.TFrame")
-        status_row.pack(fill=tk.X, pady=(0, 10))
+        status_row.pack(fill=tk.X, pady=(0, 6))
         ttk.Label(status_row, text="현재 상태:", style="Guide.TLabel").pack(side=tk.LEFT)
         ttk.Label(status_row, textvariable=self.status_var, style="Status.TLabel").pack(
             side=tk.LEFT, padx=(8, 0)
@@ -1408,7 +1398,7 @@ class App(tk.Tk):
             preview_frame,
             columns=columns,
             show="headings",
-            height=11,
+            height=18,
         )
         self.preview_tree.heading("index", text="번호")
         self.preview_tree.heading("duration", text="길이")
@@ -1432,7 +1422,7 @@ class App(tk.Tk):
         self.log_text = tk.Text(
             log_frame,
             wrap=tk.WORD,
-            height=14,
+            height=22,
             bg="#fbfcfe",
             fg="#1f2937",
             relief=tk.FLAT,
