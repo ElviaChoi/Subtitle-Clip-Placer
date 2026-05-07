@@ -87,7 +87,7 @@ def read_scene_table(path: Path) -> list[SceneCue]:
         cleaned = (key or "").strip().replace(" ", "")
         if cleaned in {"한글내레이션", "내레이션", "대사", "시작대사", "시작자막"}:
             narration_key = key
-        if cleaned in {"시작~끝", "시작끝", "시간", "구간", "길이"}:
+        if cleaned in {"시작~끝", "시작끝", "시작시간", "시작시각", "시간", "구간", "길이", "start", "starttime"}:
             time_key = key
     if narration_key is None:
         raise ValueError("AI 장면표에는 '한글 내레이션' 또는 '시작 자막' 열이 있어야 합니다.")
