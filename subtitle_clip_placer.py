@@ -1114,8 +1114,8 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Subtitle Clip Placer")
-        self.geometry("1180x940")
-        self.minsize(1000, 820)
+        self.geometry("1180x1020")
+        self.minsize(1000, 900)
         self.configure(bg="#f3f5f7")
 
         self.log_queue: queue.Queue[str] = queue.Queue()
@@ -1191,11 +1191,11 @@ class App(tk.Tk):
         style.configure("Treeview.Heading", font=("Malgun Gothic", 9, "bold"))
 
     def create_widgets(self) -> None:
-        root = ttk.Frame(self, padding=18, style="App.TFrame")
+        root = ttk.Frame(self, padding=14, style="App.TFrame")
         root.pack(fill=tk.BOTH, expand=True)
 
-        header = tk.Frame(root, bg="#182235", height=62)
-        header.pack(fill=tk.X, pady=(0, 10))
+        header = tk.Frame(root, bg="#182235", height=68)
+        header.pack(fill=tk.X, pady=(0, 8))
         header.pack_propagate(False)
         tk.Label(
             header,
@@ -1203,16 +1203,16 @@ class App(tk.Tk):
             bg="#182235",
             fg="#ffffff",
             font=("Malgun Gothic", 16, "bold"),
-        ).pack(anchor=tk.W, padx=16, pady=(9, 0))
+        ).pack(anchor=tk.W, padx=14, pady=(3, 0))
         tk.Label(
             header,
             text="SRT 대사 기준으로 영상 클립을 배치하고 Excel 작업표로 매칭을 관리합니다.",
             bg="#182235",
             fg="#b9c3d4",
             font=("Malgun Gothic", 9),
-        ).pack(anchor=tk.W, padx=17, pady=(2, 0))
+        ).pack(anchor=tk.W, padx=15, pady=(0, 12))
 
-        form = ttk.LabelFrame(root, text="파일과 출력 설정", padding=10, style="Panel.TLabelframe")
+        form = ttk.LabelFrame(root, text="파일과 출력 설정", padding=8, style="Panel.TLabelframe")
         form.pack(fill=tk.X)
         form.columnconfigure(0, minsize=132)
         form.columnconfigure(1, weight=1)
@@ -1224,7 +1224,7 @@ class App(tk.Tk):
         self.add_path_row(form, 4, "ffmpeg.exe", self.ffmpeg_var, self.browse_ffmpeg)
 
         ttk.Label(form, text="화면 비율", style="Panel.TLabel").grid(
-            row=5, column=0, sticky=tk.W, padx=(0, 18), pady=8
+            row=5, column=0, sticky=tk.W, padx=(0, 18), pady=4
         )
         aspect = ttk.Combobox(
             form,
@@ -1233,10 +1233,10 @@ class App(tk.Tk):
             state="readonly",
             font=("Malgun Gothic", 10),
         )
-        aspect.grid(row=5, column=1, sticky=tk.EW, pady=8)
+        aspect.grid(row=5, column=1, sticky=tk.EW, pady=4)
 
         ttk.Label(form, text="부족한 영상 처리", style="Panel.TLabel").grid(
-            row=6, column=0, sticky=tk.W, padx=(0, 18), pady=8
+            row=6, column=0, sticky=tk.W, padx=(0, 18), pady=4
         )
         mode = ttk.Combobox(
             form,
@@ -1245,13 +1245,13 @@ class App(tk.Tk):
             state="readonly",
             font=("Malgun Gothic", 10),
         )
-        mode.grid(row=6, column=1, sticky=tk.EW, pady=8)
+        mode.grid(row=6, column=1, sticky=tk.EW, pady=4)
 
         ttk.Label(form, text="세부 옵션", style="Panel.TLabel").grid(
-            row=7, column=0, sticky=tk.NW, padx=(0, 18), pady=(8, 6)
+            row=7, column=0, sticky=tk.NW, padx=(0, 18), pady=(4, 4)
         )
         options = ttk.Frame(form, style="Panel.TFrame")
-        options.grid(row=7, column=1, sticky=tk.EW, pady=(6, 8))
+        options.grid(row=7, column=1, sticky=tk.EW, pady=(4, 4))
         options.columnconfigure(0, weight=1)
         options.columnconfigure(1, weight=1)
 
@@ -1334,7 +1334,7 @@ class App(tk.Tk):
         ).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
 
         actions = ttk.Frame(root, style="App.TFrame")
-        actions.pack(fill=tk.X, pady=(8, 8))
+        actions.pack(fill=tk.X, pady=(6, 6))
         ttk.Button(actions, text="1. 미리보기 확인", command=self.refresh_preview).pack(
             side=tk.LEFT, padx=(0, 8)
         )
@@ -1398,7 +1398,7 @@ class App(tk.Tk):
             preview_frame,
             columns=columns,
             show="headings",
-            height=18,
+            height=24,
         )
         self.preview_tree.heading("index", text="번호")
         self.preview_tree.heading("duration", text="길이")
@@ -1422,7 +1422,7 @@ class App(tk.Tk):
         self.log_text = tk.Text(
             log_frame,
             wrap=tk.WORD,
-            height=22,
+            height=28,
             bg="#fbfcfe",
             fg="#1f2937",
             relief=tk.FLAT,
@@ -1437,13 +1437,13 @@ class App(tk.Tk):
 
     def add_path_row(self, parent, row: int, label: str, var: tk.StringVar, command) -> None:
         ttk.Label(parent, text=label, style="Panel.TLabel").grid(
-            row=row, column=0, sticky=tk.W, padx=(0, 18), pady=6
+            row=row, column=0, sticky=tk.W, padx=(0, 18), pady=4
         )
         ttk.Entry(parent, textvariable=var).grid(
-            row=row, column=1, sticky=tk.EW, padx=(0, 8), pady=6
+            row=row, column=1, sticky=tk.EW, padx=(0, 8), pady=4
         )
         ttk.Button(parent, text="선택", command=command).grid(
-            row=row, column=2, sticky=tk.E, pady=6
+            row=row, column=2, sticky=tk.E, pady=4
         )
 
     def update_mode_option_state(self, *_args) -> None:
